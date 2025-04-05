@@ -32,13 +32,13 @@ spec:
             port:
               number: 8081
 
-  - host: dashboard.kibana
-    http:
-      paths:
-      - pathType: Prefix
-        path: "/"
-        backend:
-          service:
-            name: kibana-service
-            port:
-              number: 5601
+  # - host: dashboard.kibana
+  #   http:
+  #     paths:
+  #     - pathType: Prefix
+  #       path: "/"
+  #       backend:
+  #         service:
+  #           name: kibana-service
+  #           port:
+  #             number: 5601

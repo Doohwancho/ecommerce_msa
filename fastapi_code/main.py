@@ -1,6 +1,6 @@
 import logging
 from logging.config import dictConfig
-import logstash 
+# import logstash 
 import socket
 from fastapi import FastAPI, HTTPException
 from pymongo import MongoClient
@@ -8,8 +8,8 @@ from pydantic import BaseModel
 import os
 
 # 로깅 설정
-LOGSTASH_HOST = 'logstash-service'
-LOGSTASH_PORT = 5044
+# LOGSTASH_HOST = 'logstash-service'
+# LOGSTASH_PORT = 5044
 
 log_config = {
     "version": 1,
@@ -27,18 +27,19 @@ log_config = {
             "formatter": "json",
             "stream": "ext://sys.stdout",
         },
-        "logstash": {
-            "class": "logstash.TCPLogstashHandler",
-            "host": "logstash-service",
-            "port": 5044,
-            "version": 1,
-            "message_type": "python-logstash",
-            "tags": ["fastapi"]
-        }
+        # "logstash": {
+        #     "class": "logstash.TCPLogstashHandler",
+        #     "host": "logstash-service",
+        #     "port": 5044,
+        #     "version": 1,
+        #     "message_type": "python-logstash",
+        #     "tags": ["fastapi"]
+        # }
     },
     "loggers": {
         "app": {
-            "handlers": ["console", "logstash"],
+            # "handlers": ["console", "logstash"], # logstash를 안쓰면 주석처리 
+            "handlers": ["console"],
             "level": "INFO",
             "propagate": True
         },

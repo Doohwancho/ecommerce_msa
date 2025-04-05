@@ -20,9 +20,9 @@ kubectl delete deployments --all
 kubectl delete services fastapi-app-service || true
 kubectl delete services mongo-express-service || true
 kubectl delete services mongodb-service || true
-kubectl delete services kibana-service || true
-kubectl delete services logstash-service || true
-kubectl delete services elasticsearch-service || true
+# kubectl delete services kibana-service || true
+# kubectl delete services logstash-service || true
+# kubectl delete services elasticsearch-service || true
 
 # Delete all StatefulSets
 # kubectl delete  statefulset mongodb-stateful || true
@@ -74,10 +74,10 @@ kubectl apply -f ./k8_configs/fastapi_deployment_file.yaml # FastAPI Deployment 
 kubectl apply -f ./k8_configs/fastapi_service_file.yaml # FastAPI service
 
 # ELK
-kubectl apply -f k8_configs/logstash-config.yaml
-kubectl apply -f ./k8_configs/elastic_depl_serv.yaml # Elastic Search
-kubectl apply -f ./k8_configs/logstash_depl_serv.yaml  # Logstash
-kubectl apply -f ./k8_configs/kibana_depl_serv.yaml  # kibana dashboard
+# kubectl apply -f k8_configs/logstash-config.yaml
+# kubectl apply -f ./k8_configs/elastic_depl_serv.yaml # Elastic Search
+# kubectl apply -f ./k8_configs/logstash_depl_serv.yaml  # Logstash
+# kubectl apply -f ./k8_configs/kibana_depl_serv.yaml  # kibana dashboard
 kubectl apply -f ./k8_configs/ingress.yaml # Enable ingress for routing
 
 echo "All deployments completed. Checking pod status:"
