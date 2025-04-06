@@ -20,13 +20,14 @@ kubectl delete deployments --all
 kubectl delete services fastapi-app-service || true
 kubectl delete services mongo-express-service || true
 kubectl delete services mongodb-service || true
+kubectl delete services mysql-service || true
 # kubectl delete services kibana-service || true
 # kubectl delete services logstash-service || true
 # kubectl delete services elasticsearch-service || true
 
 # Delete all StatefulSets
 # kubectl delete  statefulset mongodb-stateful || true
-kubectl delete  statefulsets --all
+kubectl delete statefulsets --all
 
 
 # Build the Docker image
@@ -66,6 +67,44 @@ else
   exit 1
 fi
 
+
+kubectl apply -f ./k8_configs/mysql_depl_serv.yaml
+
+# MySQL 파드가 생성되고 준비될 때까지 기다리기
+echo "Deploying MySQL. Waiting for MySQL pod to be created..."
+sleep 10  # MySQL 파드 생성을 위한 대기 시간
+
+# MySQL 파드가 존재하는지 확인
+MYSQL_POD_EXISTS=false
+for i in {1..15}; do  # 시도 횟수 증가 (최대 15번)
+  if kubectl get pods -l app=mysql --no-headers 2>/dev/null | grep -q .; then
+    MYSQL_POD_EXISTS=true
+    MYSQL_POD=$(kubectl get pods -l app=mysql -o jsonpath="{.items[0].metadata.name}")
+    break
+  fi
+  echo "Waiting for MySQL pod to be created... attempt $i/15"
+  sleep 10  # 대기 시간 증가
+done
+
+if [ "$MYSQL_POD_EXISTS" = true ]; then
+  echo "MySQL pod ${MYSQL_POD} created, waiting for it to be ready..."
+  # 타임아웃 시간 증가 (5분)
+  kubectl wait --for=condition=Ready pod/$MYSQL_POD --timeout=300s
+  echo "MySQL pod is ready."
+else
+  echo "WARNING: MySQL pod was not created within the timeout period."
+  echo "Current pods:"
+  kubectl get pods
+  echo "Continuing anyway, but services may not function correctly..."
+fi
+
+
+
+# Both databases are ready, now deploy the rest
+echo "All databases are ready. Deploying remaining services..."
+
+
+
 # Then deploy the next service (e.g., Mongo Express)
 kubectl apply -f ./k8_configs/mongo_express_depl_serv.yaml # One file for both deployment and service
 
@@ -81,4 +120,5 @@ kubectl apply -f ./k8_configs/fastapi_service_file.yaml # FastAPI service
 kubectl apply -f ./k8_configs/ingress.yaml # Enable ingress for routing
 
 echo "All deployments completed. Checking pod status:"
+
 kubectl get pods

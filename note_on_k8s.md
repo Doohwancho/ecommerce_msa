@@ -146,7 +146,7 @@ password: pass
 ### 8-1. fastapi로 POST create_user 해놓고, get_users 해보자
 ```bash
 # 유저 생성
-curl -X POST http://localhost:80/create_user/ \
+curl -X POST http://localhost:80/users/create_user/ \
   -H "Content-Type: application/json" \
   -d '{
     "Name": "doohwan",
@@ -156,7 +156,7 @@ curl -X POST http://localhost:80/create_user/ \
   }'
 
 # 생성된 유저 확인
-curl -X GET http://localhost:80/get_users/doohwan
+curl -X GET http://localhost:80/users/get_users/doohwan
 ```
 
 그러면 mongo-express web page에 "my_db" 데이터베이스가 추가되면서,
@@ -287,8 +287,6 @@ curl http://localhost:9200/fastapi-logs-*/_search?pretty
 
 
 
-
-
 ## step10. kibana test
 로그 저장된걸 확인했으니까, kibana에서 로그 저장된걸 보자.
 
@@ -345,7 +343,7 @@ minikube service kibana-service
 테스트 로그 더 생성 
 ```bash
 # 여러 번 API 호출하여 로그 생성
-curl -X POST http://localhost:80/create_user/ \
+curl -X POST http://localhost:80/users/create_user/ \
   -H "Content-Type: application/json" \
   -d '{
     "Name": "user1",
@@ -354,11 +352,88 @@ curl -X POST http://localhost:80/create_user/ \
     "Learning": "elk"
   }'
 
-curl -X GET http://localhost:80/get_users/user1
+curl -X GET http://localhost:80/users/get_users/user1
+```
+
+## step11. mysql test 
+
+first open port for fastapi
+
+```bash
+minikube tunnel
+
+minikube service fastapi-app-service
+
+curl -X GET http://localhost:80/
+
+# 전체 카테고리 read
+curl http://localhost:80/categories/
+
+# create category 
+curl -X POST "http://localhost:80/categories/" -H "Content-Type: application/json" -d '{"name": "테스트 카테고리", "parent_id": 1}'
+
+# 하위 카테고리 read
+curl -s "http://localhost:80/categories/2/subcategories"
+
+# 상품-카테고리 연결 테스트
+curl -X POST "http://localhost:80/categories/product-association" -H "Content-Type: application/json" -d '{"product_id": "NEW123", "category_id": 6, "is_primary": true}'
+
+# 카테고리에 상품 검색
+curl "http://localhost:80/categories/6/products
+
+# 하위 카테고리 포함 상품 조회
+curl -s "http://localhost:80/categories/1/products?include_subcategories=true"
+```
+
+```bash
+# pod 이름따기
+kubectl get pod
+
+# MySQL 파드에 접속
+kubectl exec -it mysql-deployment-6f9b96459c-rzp2h -- bash
+
+# MySQL에 접속 (컨테이너 내부에서)
+mysql --default-character-set=utf8mb4 -u root -p
+
+mysql password(로컬 pc에 깔린 mysql에 password) 입력
+
+show databases;
+
+use product_category;
+
+show tables;
+
+select * from product_categories;
+mysql> select * from product_categories;
++------------+-------------+------------+
+| product_id | category_id | is_primary |
++------------+-------------+------------+
+| P123456    |           1 |          0 |
+| NEW123     |           6 |          1 |
+| P123456    |           3 |          1 |
++------------+-------------+------------+
+3 rows in set (0.01 sec)
+
+
+select * from categories;
+mysql> select * from categories;
++-------------+------------------------+-----------+-------+---------+
+| category_id | name                   | parent_id | level | path    |
++-------------+------------------------+-----------+-------+---------+
+|           1 | 전자제품               |      NULL |     0 | 1       |
+|           2 | 컴퓨터                 |         1 |     1 | 1/2     |
+|           3 | 스마트폰               |         1 |     1 | 1/3     |
+|           4 | 노트북                 |         2 |     2 | 1/2/4   |
+|           5 | 게이밍 노트북          |         4 |     3 | 1/2/4/5 |
+|           6 | 테스트 카테고리        |         1 |     1 | 1/6     |
++-------------+------------------------+-----------+-------+---------+
+6 rows in set (0.00 sec)
 ```
 
 
-## step11. stop & delete 
+
+
+## step12. stop & delete 
 ```bash
 # Stop minikube
 minikube stop

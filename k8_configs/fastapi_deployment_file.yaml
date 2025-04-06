@@ -47,6 +47,7 @@ spec:
           initialDelaySeconds: 30
           periodSeconds: 20
         env: # Set environment variables
+        # MongoDB 환경 변수 
         - name: MONGODB_URL # This the environment variable which will be referenced in os.getenv() in the main.py
           valueFrom: # It gets it's value from the configmap which in turns gets it's value from the "mongodb-service" which is running at some internal address
             configMapKeyRef:
@@ -62,5 +63,20 @@ spec:
             secretKeyRef:
               name: mongodb-secret
               key: mongo-root-password
+        # MySQL 환경 변수
+        - name: MYSQL_USER
+          value: "root"  # 또는 secretKeyRef 사용
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-root-password
+        - name: MYSQL_HOST
+          value: "mysql-service"
+        - name: MYSQL_DATABASE
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-database
 
 
