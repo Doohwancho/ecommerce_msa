@@ -109,6 +109,9 @@ sudo minikube tunnel
 # 이제 localhost:80번 포트로 fastapi 에 GET 요청 보낼 수 있다. 
 curl http://localhost:80
 
+# redoc 확인
+http://localhost/redoc
+
 
 # 포트포워딩으로 접근하는법 
 # 터미널1에서
@@ -162,6 +165,116 @@ curl -X GET http://localhost:80/users/get_users/doohwan
 그러면 mongo-express web page에 "my_db" 데이터베이스가 추가되면서,
 
 collection을 보면 추가된걸 확인할 수 있다. 
+
+
+### 8-2. mongodb-products 관련 CRUD 테스트
+
+제품생성 
+```bash
+curl -X POST http://localhost:80/products/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Apple 2023 MacBook Pro",
+    "description": "최신 Apple MacBook Pro, M3 Max 칩, 16인치 Liquid Retina XDR 디스플레이",
+    "brand": "Apple",
+    "model": "MUW73LL/A",
+    "sku": "MBP-16-M3-MAX",
+    "upc": "195949185694",
+    "color": "Space Gray",
+    "category_ids": [1, 2, 4],
+    "primary_category_id": 4,
+    "category_breadcrumbs": ["전자제품", "컴퓨터", "노트북"],
+    "price": {
+      "regular": 3499.99,
+      "sale": 3299.99,
+      "currency": "USD"
+    },
+    "weight": {
+      "value": 4.8,
+      "unit": "POUND"
+    },
+    "dimensions": {
+      "length": 14.01,
+      "width": 9.77,
+      "height": 0.66,
+      "dimensionUnit": "INCH"
+    },
+    "attributes": {
+      "processor": "M3 Max",
+      "ram": "32GB",
+      "storage": "1TB SSD",
+      "screen_size": "16 inch",
+      "resolution": "3456 x 2234"
+    },
+    "variants": [
+      {
+        "sku": "MBP-16-M3-MAX-SG-32GB-1TB",
+        "color": "Space Gray",
+        "storage": "1TB",
+        "price": 3499.99,
+        "inventory": 50
+      },
+      {
+        "sku": "MBP-16-M3-MAX-SIL-32GB-1TB",
+        "color": "Silver",
+        "storage": "1TB",
+        "price": 3499.99,
+        "inventory": 35
+      }
+    ],
+    "images": [
+      {
+        "url": "https://example.com/macbook-pro-1.jpg",
+        "main": true
+      },
+      {
+        "url": "https://example.com/macbook-pro-2.jpg",
+        "main": false
+      }
+    ]
+  }'
+```
+
+제품조회 
+```bash
+curl -X GET http://localhost:80/products/
+```
+
+특정제품조회 
+```bash
+curl -X GET http://localhost:80/products/{product_id}
+```
+product_id는 mongo-express에서 개별상품의 product_id 컬럼 참조 (1,2 이렇게 안되있고 P67f35faea1acefe5f1e5f393 이런식으로 되어있음)
+
+제품 업데이트 
+```bash
+curl -X PUT http://localhost:80/products/{product_id} \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Apple 2023 MacBook Pro (업데이트)",
+    "price": {
+      "regular": 3499.99,
+      "sale": 3199.99,
+      "currency": "USD"
+    },
+    "discount": 8.5
+  }'
+```
+
+제품 삭제
+```bash
+curl -X DELETE http://localhost:80/products/{product_id}
+```
+
+카테고리별 제품 조회 
+```bash
+curl -X GET http://localhost:80/products/category/4
+```
+
+제품 검색
+```bash
+curl -X GET "http://localhost:80/products/search/?q=MacBook"
+```
 
 
 

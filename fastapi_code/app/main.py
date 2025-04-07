@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from app.api.api import api_router
 from app.config.database import Base, engine, SessionLocal
-from app.core.init_db import initialize_categories
+from app.core.init_db import initialize_categories, create_mongodb_indexes  
 
 # 애플리케이션 생성
 app = FastAPI(title="E-commerce API")
@@ -26,6 +26,7 @@ async def startup_event():
     db = SessionLocal()
     try:
         initialize_categories(db)
+        create_mongodb_indexes() 
     finally:
         db.close()
 

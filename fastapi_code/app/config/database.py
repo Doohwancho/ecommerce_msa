@@ -22,6 +22,7 @@ try:
     )
     mongo_db = mongo_client.my_db
     user_collection = mongo_db.my_collection
+    product_collection = mongo_db.products
     print("MongoDB connection successful")
 except Exception as e:
     print(f"MongoDB connection error: {e}")

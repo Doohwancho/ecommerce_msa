@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 from app.services.category_manager import CategoryManager
 from app.config.logging import logger
+from app.config.database import product_collection
 
 def initialize_categories(db: Session):
     try:
@@ -33,3 +34,16 @@ def initialize_categories(db: Session):
     except Exception as e:
         logger.error(f"Error initializing categories: {str(e)}")
         db.rollback()
+
+
+def create_mongodb_indexes():
+    """MongoDB 인덱스 생성"""
+    try:
+        # 제품 컬렉션 인덱스
+        product_collection.create_index("product_id", unique=True)
+        product_collection.create_index([("title", "text"), ("description", "text"), ("brand", "text"), ("model", "text")])
+        product_collection.create_index("category_ids")
+        product_collection.create_index("primary_category_id")
+        logger.info("MongoDB indexes created successfully")
+    except Exception as e:
+        logger.error(f"Error creating MongoDB indexes: {str(e)}")
