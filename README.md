@@ -2,15 +2,6 @@
 
 fastAPI + mysql + mongodb + mongo-express + ELK(for logging) on k8s
 
-step1) monolith
-
-- Monolithic FastAPI 서버 (users + products)
-- MongoDB (users, products)
-- MySQL (categories)
-- Nginx Ingress (API Gateway)
-- K8s DNS (기본 Service Discovery)
-- ELK (logging)
-
 step2) MSA 전환
 
 - Monolithic FastAPI 서버 (users / products / orders)
@@ -21,41 +12,6 @@ step2) MSA 전환
 - gRPC (instead of httpx)
 - ELK (logging)
 
-erd for orders & product category on mysql
-
-```sql
-categories
-----------
-category_id (PK)
-name
-parent_id (FK -> categories.category_id)
-level
-path
-
-category_products
-----------------
-product_id (PK) -> MongoDB product collection 참조
-category_id (PK, FK -> categories.category_id)
-is_primary (Boolean)
-
-orders
-------
-order_id (PK)
-user_id
-status (enum: 'pending', 'processing', 'completed', 'cancelled')
-total_amount
-created_at
-updated_at
-
-order_items
-----------
-order_item_id (PK)
-order_id (FK -> orders.order_id)
-product_id (FK -> category_products.product_id)
-quantity
-price_at_order
-created_at
-```
 
 step3) + message queue
 

@@ -15,40 +15,41 @@ spec:
         app: product-service
     spec:
       containers:
-      - name: product-service-container
-        image: doohwancho/fastapi-product-service:latest
-        ports:
-        - containerPort: 8000
-        env:
-        - name: MONGODB_URL
-          valueFrom:
-            configMapKeyRef:
-              name: mongodb-configmap
-              key: database_url
-        - name: MONGODB_USERNAME
-          valueFrom:
-            secretKeyRef:
-              name: mongodb-secret
-              key: mongo-root-username
-        - name: MONGODB_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: mongodb-secret
-              key: mongo-root-password
-        - name: MYSQL_USER
-          value: "root"
-        - name: MYSQL_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: mysql-secret
-              key: mysql-root-password
-        - name: MYSQL_HOST
-          value: "mysql-service"
-        - name: MYSQL_DATABASE
-          valueFrom:
-            secretKeyRef:
-              name: mysql-secret
-              key: mysql-database
+        - name: product-service-container
+          image: doohwancho/fastapi-product-service:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MONGODB_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: mongodb-configmap
+                  key: database_url
+            - name: MONGODB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: mongo-root-username
+            - name: MONGODB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-secret
+                  key: mongo-root-password
+            - name: MYSQL_USER
+              value: "root"
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: mysql-root-password
+            - name: MYSQL_HOST
+              value: "mysql-service"
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: mysql-database
 ---
 apiVersion: v1
 kind: Service
@@ -58,6 +59,6 @@ spec:
   selector:
     app: product-service
   ports:
-  - protocol: TCP
-    port: 8000
-    targetPort: 8000
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000

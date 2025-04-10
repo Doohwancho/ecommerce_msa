@@ -38,3 +38,17 @@ class UserService:
         if user:
             return UserResponse(id=str(user["_id"]), **user)
         return None
+
+    @staticmethod
+    async def get_user_by_id(user_id: str) -> UserResponse:
+        users_collection = get_users_collection()
+        if users_collection is None:
+            raise Exception("Database connection failed")
+        
+        try:
+            user = users_collection.find_one({"_id": ObjectId(user_id)})
+            if user:
+                return UserResponse(id=str(user["_id"]), **user)
+            return None
+        except Exception as e:
+            raise Exception(f"Invalid user ID format: {str(e)}")

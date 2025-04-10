@@ -11,7 +11,7 @@ class UserClient:
         """사용자 정보 조회"""
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             try:
-                response = await client.get(f"{self.base_url}/api/users/{user_id}")
+                response = await client.get(f"{self.base_url}/api/users/id/{user_id}")
                 if response.status_code == 404:
                     raise HTTPException(status_code=404, detail=f"User {user_id} not found")
                 response.raise_for_status()

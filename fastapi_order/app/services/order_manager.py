@@ -19,7 +19,7 @@ class OrderManager:
     async def create_order(self, order_create: OrderCreate) -> Order:
         logger.info("Creating a new order")
         # 사용자 존재 확인
-        await self.user_client.get_user(order_create.user_id)
+        user = await self.user_client.get_user(order_create.user_id)
         
         # 상품 정보 확인 및 가격 가져오기
         product_ids = [item.product_id for item in order_create.items]
@@ -36,7 +36,7 @@ class OrderManager:
         total_amount = 0
         for item in order_create.items:
             product = product_dict[item.product_id]
-            price = product["price"]
+            price = product["price"]["amount"]  # price dictionary에서 amount 값을 사용
             total_amount += price * item.quantity
             product_details.append({
                 "product_id": item.product_id,

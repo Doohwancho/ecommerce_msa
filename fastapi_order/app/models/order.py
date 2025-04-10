@@ -28,7 +28,7 @@ class OrderItem(Base):
     
     order_item_id = Column(Integer, primary_key=True, autoincrement=True)
     order_id = Column(Integer, ForeignKey('orders.order_id', ondelete='CASCADE'))
-    product_id = Column(String(24), nullable=False)
+    product_id = Column(String(50), nullable=False)
     quantity = Column(Integer, nullable=False)
     price_at_order = Column(Float, nullable=False)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)

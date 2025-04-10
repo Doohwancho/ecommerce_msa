@@ -1,5 +1,7 @@
 # A. what 
 
+## a. definition 
+
 fastapi(user / product / order) + mongodb + ELK on k8s, MSA
 
 1. k8s에서 간단한 webapp + ELK for logging run
@@ -10,6 +12,45 @@ fastapi(user / product / order) + mongodb + ELK on k8s, MSA
 6. kibana dashboard에서 로그 visualize
 
 [resource](https://github.com/deshwalmahesh/fastapi-kubernetes/tree/main)
+
+## b. erd (mysql)
+categories & products & orders & order_items
+
+```sql
+categories
+----------
+category_id (PK)
+name
+parent_id (FK -> categories.category_id)
+level
+path
+
+category_products
+----------------
+product_id (PK) -> MongoDB product collection 참조
+category_id (PK, FK -> categories.category_id)
+is_primary (Boolean)
+
+orders
+------
+order_id (PK)
+user_id
+status (enum: 'pending', 'processing', 'completed', 'cancelled')
+total_amount
+created_at
+updated_at
+
+order_items
+----------
+order_item_id (PK)
+order_id (FK -> orders.order_id)
+product_id (FK -> category_products.product_id)
+quantity
+price_at_order
+created_at
+```
+
+
 
 
 # B. test 
@@ -56,49 +97,16 @@ curl -X POST http://localhost:8001/api/users/ \
     "learning": "k8s"
   }'
 
+curl -X GET http://localhost:8001/api/users/id/67f79a1c4c3dd886d3eb859b
+
 curl -X GET http://localhost:8001/api/users/doohwan
 
 # 다른 터미널에서 테스트
 curl -X GET http://localhost:8001/api/users/
 ```
 
-## c. test order module
-```bash
-############################################################
-############################################################
-############################################################
-# order test 
-minikube tunnel
 
-kubectl port-forward service/order-service 8003:8000
-
-http://localhost:8003/docs#/
-
-curl -X POST http://localhost:8003/api/orders/ \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "12345",
-    "items": [
-      {
-        "product_id": "67890",
-        "quantity": 2
-      }
-    ]
-  }'
-
-# 테스트
-curl -X GET http://localhost:8003/api/orders/
-curl -X GET http://localhost:8003/api/orders/1
-curl -X GET http://localhost:8003/api/orders/user/12345
-curl -X PUT http://localhost:8003/api/orders/1/status \
-  -H "Content-Type: application/json" \
-  -d '{
-    "status": "SHIPPED"
-  }'
-```
-
-
-## d. test product module
+## c. test product module
 ```bash
 ############################################################
 ############################################################
@@ -197,6 +205,41 @@ product-service pod에 로그를 보면,
 curl -X GET http://localhost:8002/api/products/P67f60c5af9dc66c37747ef8f
 ```
 
+## d. test order module
+```bash
+############################################################
+############################################################
+############################################################
+# order test 
+minikube tunnel
+
+kubectl port-forward service/order-service 8003:8000
+
+http://localhost:8003/docs#/
+
+curl -X POST http://localhost:8003/api/orders/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user 생성하고 나온 id 적기 (ex. 67f7b009803cf6478b3f502b)",
+    "items": [
+      {
+        "product_id": "product 생성하고 나온 id 적기(ex. P67f7b01746aa16726c1d3660)",
+        "quantity": 2
+      }
+    ]
+  }'
+
+# 테스트
+curl -X GET http://localhost:8003/api/orders/1
+curl -X GET http://localhost:8003/api/orders/user/67f7b009803cf6478b3f502b
+curl -X PUT http://localhost:8003/api/orders/1/status \
+  -H "Content-Type: application/json" \
+  -d '{
+    "status": "SHIPPED"
+  }'
+```
+
+
 
 ## e. test category inside product module
 ```bash
@@ -257,9 +300,4 @@ curl -v -H "Host: my-deployed-app.com" http://localhost:80/
 curl -v -H "Host: my-deployed-app.com" http://localhost:80/api/products
 curl -v -H "Host: my-deployed-app.com" http://localhost:80/api/users
 curl -v -H "Host: my-deployed-app.com" http://localhost:80/api/orders
-
-curl -X GET http://localhost:80
-curl -X GET http://localhost:80/api/users
-curl -X GET http://localhost:80/api/products
-curl -X GET http://localhost:80/api/orders
 ```

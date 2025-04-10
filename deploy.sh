@@ -10,22 +10,21 @@ set -e # Stop on error
 
 # 사용자 서비스 빌드
 echo "Building user service..."
-docker build -t fastapi-user-service ./fastapi_user/.
-docker tag fastapi-user-service doohwancho/fastapi-user-service
-docker push doohwancho/fastapi-user-service
+docker build --no-cache -t fastapi-user-service:latest ./fastapi_user/.
+docker tag fastapi-user-service:latest doohwancho/fastapi-user-service:latest
+docker push doohwancho/fastapi-user-service:latest
 
 # 상품 서비스 빌드
 echo "Building product service..."
-docker build -t fastapi-product-service ./fastapi_product/.
-docker tag fastapi-product-service doohwancho/fastapi-product-service
-docker push doohwancho/fastapi-product-service
+docker build --no-cache -t fastapi-product-service:latest ./fastapi_product/.
+docker tag fastapi-product-service:latest doohwancho/fastapi-product-service:latest
+docker push doohwancho/fastapi-product-service:latest
 
 # 주문 서비스 빌드
 echo "Building order service..."
-docker build -t fastapi-order-service ./fastapi_order/.
-docker tag fastapi-order-service doohwancho/fastapi-order-service
-docker push doohwancho/fastapi-order-service
-
+docker build --no-cache -t fastapi-order-service:latest ./fastapi_order/.
+docker tag fastapi-order-service:latest doohwancho/fastapi-order-service:latest
+docker push doohwancho/fastapi-order-service:latest
 
 
 
@@ -37,6 +36,11 @@ docker push doohwancho/fastapi-order-service
 # kubectl delete deployment elasticsearch-deployment || true
 kubectl delete deployments --all
 # kubectl delete services user-service product-service order-service || true
+
+# Delete MySQL PVC and PV
+echo "Deleting MySQL PVC and PV..."
+kubectl delete pvc mysql-pv-claim || true
+kubectl delete pv mysql-pv-volume || true
 
 # Delete all Ingress resources
 echo "Deleting existing Ingress resources..."
