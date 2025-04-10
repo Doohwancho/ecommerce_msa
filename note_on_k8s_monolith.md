@@ -29,7 +29,7 @@ brew install minikube
 ## step2. 로컬 이미지 빌드 
 ```bash
 # 로컬 이미지 빌드
-docker build -t fastapi-image-test-k8 ./fastapi_code/.
+docker build -t fastapi-image-test-k8 ./fastapi_monolith/.
 
 # 도커허브용으로 태그 달기
 docker tag fastapi-image-test-k8 doohwancho/fastapi-image-test-k8

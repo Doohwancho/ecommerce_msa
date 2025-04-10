@@ -5,8 +5,29 @@ set -e # Stop on error
 # kubectl delete all --all # Delete all the pods and services running
 
 # Remove the Docker images
-docker rmi fastapi-image-test-k8 || true # || true means if error comes, skip onto next process
-docker rmi doohwancho/fastapi-image-test-k8 || true
+# docker rmi fastapi-image-test-k8 || true # || true means if error comes, skip onto next process
+# docker rmi doohwancho/fastapi-image-test-k8 || true
+
+# 사용자 서비스 빌드
+echo "Building user service..."
+docker build -t fastapi-user-service ./fastapi_user/.
+docker tag fastapi-user-service doohwancho/fastapi-user-service
+docker push doohwancho/fastapi-user-service
+
+# 상품 서비스 빌드
+echo "Building product service..."
+docker build -t fastapi-product-service ./fastapi_product/.
+docker tag fastapi-product-service doohwancho/fastapi-product-service
+docker push doohwancho/fastapi-product-service
+
+# 주문 서비스 빌드
+echo "Building order service..."
+docker build -t fastapi-order-service ./fastapi_order/.
+docker tag fastapi-order-service doohwancho/fastapi-order-service
+docker push doohwancho/fastapi-order-service
+
+
+
 
 # Delete all the Kubernetes deployments
 # kubectl delete deployment fastapi-deployment || true
@@ -15,6 +36,13 @@ docker rmi doohwancho/fastapi-image-test-k8 || true
 # kubectl delete deployment logstash-deployment || true
 # kubectl delete deployment elasticsearch-deployment || true
 kubectl delete deployments --all
+# kubectl delete services user-service product-service order-service || true
+
+# Delete all Ingress resources
+echo "Deleting existing Ingress resources..."
+# kubectl delete ingress ingress-routing
+kubectl delete ingress --all || true
+
 
 # Delete the Services
 kubectl delete services fastapi-app-service || true
@@ -31,7 +59,7 @@ kubectl delete statefulsets --all
 
 
 # Build the Docker image
-docker build --no-cache -t fastapi-image-test-k8 ./fastapi_code/.
+docker build --no-cache -t fastapi-image-test-k8 ./fastapi_monolith/.
 
 # Tag and push the Docker image
 docker tag fastapi-image-test-k8 doohwancho/fastapi-image-test-k8
@@ -109,8 +137,11 @@ echo "All databases are ready. Deploying remaining services..."
 kubectl apply -f ./k8_configs/mongo_express_depl_serv.yaml # One file for both deployment and service
 
 # run the rest
-kubectl apply -f ./k8_configs/fastapi_deployment_file.yaml # FastAPI Deployment pod
-kubectl apply -f ./k8_configs/fastapi_service_file.yaml # FastAPI service
+kubectl apply -f ./k8_configs/fastapi_user_deployment.yaml
+kubectl apply -f ./k8_configs/fastapi_product_deployment.yaml
+kubectl apply -f ./k8_configs/fastapi_order_deployment.yaml
+# kubectl apply -f ./k8_configs/fastapi_deployment_file.yaml # FastAPI Deployment pod
+# kubectl apply -f ./k8_configs/fastapi_service_file.yaml # FastAPI service
 
 # ELK
 # kubectl apply -f k8_configs/logstash-config.yaml
