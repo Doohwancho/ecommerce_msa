@@ -8,6 +8,15 @@ set -e # Stop on error
 # docker rmi fastapi-image-test-k8 || true # || true means if error comes, skip onto next process
 # docker rmi doohwancho/fastapi-image-test-k8 || true
 
+
+# 프로토 파일을 각 서비스 디렉토리에 복사
+echo "Copying proto files..."
+cp proto/user.proto fastapi_user/proto/
+cp proto/product.proto fastapi_product/proto/
+cp proto/order.proto fastapi_order/proto/
+cp proto/user.proto fastapi_order/proto/
+cp proto/product.proto fastapi_order/proto/
+
 # 사용자 서비스 빌드
 echo "Building user service..."
 docker build --no-cache -t fastapi-user-service:latest ./fastapi_user/.

@@ -15,12 +15,23 @@ spec:
         app: order-service
     spec:
       containers:
-        - name: order-service-container
+        - name: order-service
           image: doohwancho/fastapi-order-service:latest
           imagePullPolicy: Always
           ports:
-            - containerPort: 8000
+            - name: http
+              containerPort: 8000
+            - name: grpc
+              containerPort: 50051
           env:
+            - name: USER_SERVICE_HOST
+              value: "user-service"
+            - name: USER_SERVICE_GRPC_PORT
+              value: "50051"
+            - name: PRODUCT_SERVICE_HOST
+              value: "product-service"
+            - name: PRODUCT_SERVICE_GRPC_PORT
+              value: "50051"
             - name: MYSQL_USER
               value: "root"
             - name: MYSQL_PASSWORD
@@ -35,10 +46,6 @@ spec:
                 secretKeyRef:
                   name: mysql-secret
                   key: mysql-database
-            - name: USER_SERVICE_URL
-              value: "http://user-service:8000"
-            - name: PRODUCT_SERVICE_URL
-              value: "http://product-service:8000"
 ---
 apiVersion: v1
 kind: Service
@@ -48,6 +55,12 @@ spec:
   selector:
     app: order-service
   ports:
-    - protocol: TCP
+    - name: http
+      protocol: TCP
       port: 8000
       targetPort: 8000
+    - name: grpc
+      protocol: TCP
+      port: 50051
+      targetPort: 50051
+  type: LoadBalancer

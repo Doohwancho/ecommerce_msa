@@ -119,7 +119,7 @@ kubectl port-forward service/product-service 8002:8000
 curl -X POST http://localhost:8002/api/products/ \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "Apple 2023 MacBook Pro",
+    "title": "Apple 2025 MacBook Pro",
     "description": "최신 Apple MacBook Pro, M3 Max 칩, 16인치 Liquid Retina XDR 디스플레이",
     "brand": "Apple",
     "model": "MUW73LL/A",
@@ -133,6 +133,7 @@ curl -X POST http://localhost:8002/api/products/ \
       "amount": 3499.99,
       "currency": "USD"
     },
+    "stock": 85, 
     "weight": {
       "value": 4.8,
       "unit": "POUND"
@@ -202,7 +203,7 @@ product-service pod에 로그를 보면,
 
 이렇게 pid가 뜨고, 이걸로 GET요청을 넣으면, 
 
-curl -X GET http://localhost:8002/api/products/P67f60c5af9dc66c37747ef8f
+curl -X GET http://localhost:8002/api/products/P67fa37615a415218d868a076
 ```
 
 ## d. test order module
@@ -220,10 +221,10 @@ http://localhost:8003/docs#/
 curl -X POST http://localhost:8003/api/orders/ \
   -H "Content-Type: application/json" \
   -d '{
-    "user_id": "user 생성하고 나온 id 적기 (ex. 67f7b009803cf6478b3f502b)",
+    "user_id": "67f93fede0082a67e4e00243",
     "items": [
       {
-        "product_id": "product 생성하고 나온 id 적기(ex. P67f7b01746aa16726c1d3660)",
+        "product_id": "P67fa37615a415218d868a076",
         "quantity": 2
       }
     ]

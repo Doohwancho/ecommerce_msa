@@ -11,7 +11,7 @@ async def create_product(product: ProductCreate):
     """새 상품 생성"""
     try:
         service = ProductService()
-        return service.create_product(product)
+        return await service.create_product(product)
     except Exception as e:
         logger.error(f"Failed to create product: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -21,7 +21,7 @@ async def get_product(product_id: str):
     """상품 조회"""
     try:
         service = ProductService()
-        product = service.get_product(product_id)
+        product = await service.get_product(product_id)
         if not product:
             raise HTTPException(status_code=404, detail=f"Product {product_id} not found")
         return product
@@ -36,7 +36,7 @@ async def update_product(product_id: str, product: ProductUpdate):
     """상품 업데이트"""
     try:
         service = ProductService()
-        updated_product = service.update_product(product_id, product)
+        updated_product = await service.update_product(product_id, product)
         if not updated_product:
             raise HTTPException(status_code=404, detail=f"Product {product_id} not found")
         return updated_product
@@ -51,7 +51,7 @@ async def delete_product(product_id: str):
     """상품 삭제"""
     try:
         service = ProductService()
-        success = service.delete_product(product_id)
+        success = await service.delete_product(product_id)
         if not success:
             raise HTTPException(status_code=404, detail=f"Product {product_id} not found")
         return {"message": "Product deleted successfully"}
@@ -66,7 +66,7 @@ async def get_products(skip: int = 0, limit: int = 100):
     """상품 목록 조회"""
     try:
         service = ProductService()
-        return service.get_products(skip, limit)
+        return await service.get_products(skip, limit)
     except Exception as e:
         logger.error(f"Failed to get products: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -76,7 +76,7 @@ async def check_products_exist(request: ProductsExistRequest):
     """여러 상품이 존재하는지 확인"""
     try:
         service = ProductService()
-        return service.check_products_exist(request.product_ids)
+        return await service.check_products_exist(request.product_ids)
     except Exception as e:
         logger.error(f"Failed to check products existence: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -11,6 +11,9 @@ class OrderCreate(BaseModel):
     user_id: str
     items: List[OrderItemCreate]
 
+class OrderUpdate(BaseModel):
+    status: OrderStatus
+
 class OrderItemResponse(BaseModel):
     order_item_id: int
     product_id: str
@@ -31,4 +34,4 @@ class OrderResponse(BaseModel):
     items: List[OrderItemResponse]
 
     class Config:
-        orm_mode = True
+        orm_mode = True 

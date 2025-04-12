@@ -3,34 +3,68 @@ from sqlalchemy.orm import Session
 from app.api.api import api_router
 from app.config.database import Base, engine, get_mysql_db
 from app.core.init_db import initialize_categories, create_mongodb_indexes
+import logging
+import asyncio
+import uvicorn
+# gRPC server import
+from app.grpc.product_server import serve as grpc_serve
+from contextlib import asynccontextmanager
 
-# 애플리케이션 생성
-app = FastAPI(title="Product Service API", 
-    # root_path="/products"
-)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# API 라우터 등록
+# Global variable to store the gRPC server task
+grpc_task = None
+
+# Use FastAPI's lifespan to manage the gRPC server
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Start gRPC server in background
+    global grpc_task
+    logger.info("Starting gRPC server in background")
+    grpc_task = asyncio.create_task(grpc_serve())  # Fixed: use grpc_serve instead of user_serve
+    yield
+    # Cleanup when FastAPI shuts down
+    if grpc_task:
+        logger.info("Shutting down gRPC server")
+        grpc_task.cancel()
+        try:
+            await grpc_task
+        except asyncio.CancelledError:
+            logger.info("gRPC server task cancelled")
+
+# Create application with lifespan handler
+app = FastAPI(title="Product Service API", lifespan=lifespan)
+
+# API router registration
 app.include_router(api_router, prefix="/api")
 
-# 테이블 생성
+# Create tables
 Base.metadata.create_all(bind=engine)
-
-# 시작 시 초기화 작업
-@app.on_event("startup")
-async def startup_event():
-    # MongoDB 인덱스 생성
-    create_mongodb_indexes()
 
 @app.get("/health")
 def health_check():
+    logger.info("Health check endpoint called")
     return {"status": "OK"}
 
 @app.get("/")
 def read_root():
-    return {"message": "Welcome to the Product Service API"}
+    logger.info("Root endpoint called")
+    return {"message": "Welcome to the Product Service API"}  # Fixed: Product instead of User
 
-# 초기 데이터 생성 엔드포인트 (필요한 경우에만 호출)
+# Initialize during startup
+@app.on_event("startup")
+async def startup_event():
+    # Create MongoDB indexes
+    create_mongodb_indexes()
+
+# Initialize data endpoint (call only when needed)
 @app.post("/init-data")
 def initialize_data(db: Session = Depends(get_mysql_db)):
     initialize_categories(db)
     return {"message": "Data initialized successfully"}
+
+if __name__ == "__main__":
+    # Run only FastAPI - the gRPC server will be started by the lifespan handler
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, log_level="info")

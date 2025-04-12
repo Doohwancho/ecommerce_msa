@@ -15,6 +15,7 @@ class ProductCreate(BaseModel):
     weight: Optional[ProductWeight] = None
     dimensions: Optional[ProductDimension] = None
     price: ProductPrice
+    stock: int = Field(default=0, ge=0)
     discount: Optional[float] = None
     estimated_sales_revenue: Optional[float] = None
     estimated_unit_sold: Optional[int] = None
@@ -37,6 +38,7 @@ class ProductUpdate(BaseModel):
     weight: Optional[ProductWeight] = None
     dimensions: Optional[ProductDimension] = None
     price: Optional[ProductPrice] = None
+    stock: Optional[int] = Field(default=None, ge=0)
     discount: Optional[float] = None
     estimated_sales_revenue: Optional[float] = None
     estimated_unit_sold: Optional[int] = None
@@ -60,6 +62,7 @@ class ProductResponse(BaseModel):
     weight: Optional[ProductWeight] = None
     dimensions: Optional[ProductDimension] = None
     price: ProductPrice
+    stock: int = Field(default=0, ge=0)
     discount: Optional[float] = None
     estimated_sales_revenue: Optional[float] = None
     estimated_unit_sold: Optional[int] = None

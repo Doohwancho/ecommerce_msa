@@ -21,3 +21,4 @@ def get_mysql_db():
         yield db
     finally:
         db.close()
+

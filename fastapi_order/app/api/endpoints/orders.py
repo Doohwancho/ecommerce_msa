@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.config.database import get_mysql_db
 from app.services.order_manager import OrderManager
-from app.models.schemas import OrderCreate, OrderResponse
+from app.schemas import OrderCreate, OrderResponse
 from app.models.order import OrderStatus
 from typing import List
 import logging

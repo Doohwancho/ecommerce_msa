@@ -47,6 +47,7 @@ class Product(BaseModel):
     
     # 가격 및 판매 정보
     price: ProductPrice
+    stock: Optional[int] = None
     discount: Optional[float] = None
     estimated_sales_revenue: Optional[float] = None
     estimated_unit_sold: Optional[int] = None
