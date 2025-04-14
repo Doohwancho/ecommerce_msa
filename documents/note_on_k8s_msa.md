@@ -182,10 +182,10 @@ http://localhost:8003/docs#/
 curl -X POST http://localhost:8003/api/orders/ \
   -H "Content-Type: application/json" \
   -d '{
-    "user_id": "67f93fede0082a67e4e00243",
+    "user_id": "67fce9faab19bca9073204c4",
     "items": [
       {
-        "product_id": "P67fa37615a415218d868a076",
+        "product_id": "P67fcf4a101735a7e57653df1",
         "quantity": 2
       }
     ]

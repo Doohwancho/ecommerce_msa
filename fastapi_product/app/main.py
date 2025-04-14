@@ -1,7 +1,8 @@
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.api import api_router
-from app.config.database import Base, engine, get_mysql_db
+from app.config.database import Base, engine, get_mysql_db, get_async_mysql_db
 from app.core.init_db import initialize_categories, create_mongodb_indexes
 import logging
 import asyncio
@@ -23,8 +24,14 @@ async def lifespan(app: FastAPI):
     # Start gRPC server in background
     global grpc_task
     logger.info("Starting gRPC server in background")
-    grpc_task = asyncio.create_task(grpc_serve())  # Fixed: use grpc_serve instead of user_serve
+    grpc_task = asyncio.create_task(grpc_serve())
+    
+    # Create database tables
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    
     yield
+    
     # Cleanup when FastAPI shuts down
     if grpc_task:
         logger.info("Shutting down gRPC server")
@@ -40,9 +47,6 @@ app = FastAPI(title="Product Service API", lifespan=lifespan)
 # API router registration
 app.include_router(api_router, prefix="/api")
 
-# Create tables
-Base.metadata.create_all(bind=engine)
-
 @app.get("/health")
 def health_check():
     logger.info("Health check endpoint called")
@@ -51,18 +55,22 @@ def health_check():
 @app.get("/")
 def read_root():
     logger.info("Root endpoint called")
-    return {"message": "Welcome to the Product Service API"}  # Fixed: Product instead of User
+    return {"message": "Welcome to the Product Service API"}
 
 # Initialize during startup
 @app.on_event("startup")
 async def startup_event():
     # Create MongoDB indexes
-    create_mongodb_indexes()
+    await create_mongodb_indexes()
+    
+    # Initialize categories
+    async_session = await get_async_mysql_db()
+    await initialize_categories(async_session)
 
 # Initialize data endpoint (call only when needed)
 @app.post("/init-data")
-def initialize_data(db: Session = Depends(get_mysql_db)):
-    initialize_categories(db)
+async def initialize_data(db: AsyncSession = Depends(get_async_mysql_db)):
+    await initialize_categories(db)
     return {"message": "Data initialized successfully"}
 
 if __name__ == "__main__":

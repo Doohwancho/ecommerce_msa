@@ -46,6 +46,11 @@ spec:
                 secretKeyRef:
                   name: mysql-secret
                   key: mysql-database
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: kafka-config
+                  key: KAFKA_BOOTSTRAP_SERVERS
 ---
 apiVersion: v1
 kind: Service

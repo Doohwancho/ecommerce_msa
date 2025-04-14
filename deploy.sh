@@ -58,7 +58,6 @@ kubectl delete ingress --all || true
 
 
 # Delete the Services
-kubectl delete services fastapi-app-service || true
 kubectl delete services mongo-express-service || true
 kubectl delete services mongodb-service || true
 kubectl delete services mysql-service || true
@@ -72,7 +71,7 @@ kubectl delete statefulsets --all
 
 
 # Build the Docker image
-docker build --no-cache -t fastapi-image-test-k8 ./fastapi_monolith/.
+# docker build --no-cache -t fastapi-image-test-k8 ./fastapi_monolith/.
 
 # Tag and push the Docker image
 docker tag fastapi-image-test-k8 doohwancho/fastapi-image-test-k8
@@ -86,8 +85,16 @@ kubectl apply -f ./k8_configs/mongo_depl_serv.yaml # DB should be run first. One
 
 # Wait for MongoDB StatefulSet to create the pod
 echo "Waiting for MongoDB pod to be created..."
-sleep 10  # Give Kubernetes some time to create the pod
+sleep 10  # Give Kubernetes some time to create the pod)
 
+
+echo "Deploying Kafka..."
+kubectl apply -f k8_configs/kafka_configmap.yaml
+kubectl apply -f k8_configs/zookeeper_depl_serv.yaml
+kubectl apply -f k8_configs/kafka_depl_serv.yaml
+
+
+echo "Deploying MySQL..."
 # Check if the pod exists before waiting for it to be ready
 POD_EXISTS=false
 for i in {1..10}; do

@@ -2,12 +2,19 @@ from typing import List, Optional, Dict, Any
 from bson import ObjectId
 from datetime import datetime
 from app.schemas.product import ProductCreate, ProductUpdate, ProductResponse, ProductsExistResponse
-from app.config.database import product_collection
+from app.config.database import get_product_collection
 from app.config.logging import logger
 
 class ProductService:
     def __init__(self):
-        self.product_collection = product_collection
+        self.product_collection = None
+    
+    async def _get_collection(self):
+        if self.product_collection is None:
+            self.product_collection = await get_product_collection()
+            if self.product_collection is None:
+                raise Exception("Database connection failed")
+        return self.product_collection
     
     async def create_product(self, product: ProductCreate) -> ProductResponse:
         """새로운 제품 생성"""
@@ -24,7 +31,8 @@ class ProductService:
             product_dict["updated_at"] = current_time
             
             # MongoDB에 저장
-            await self.product_collection.insert_one(product_dict)
+            collection = await self._get_collection()
+            await collection.insert_one(product_dict)
             
             logger.info(f"Product created: {product_id}")
             # 삽입된 문서 반환
@@ -36,7 +44,8 @@ class ProductService:
     async def get_product(self, product_id: str) -> Optional[ProductResponse]:
         """제품 ID로 제품 조회"""
         try:
-            product = await self.product_collection.find_one({"product_id": product_id})
+            collection = await self._get_collection()
+            product = await collection.find_one({"product_id": product_id})
             if product:
                 # ObjectId를 문자열로 변환
                 if "_id" in product:
@@ -65,8 +74,9 @@ class ProductService:
     async def update_product(self, product_id: str, product_update: ProductUpdate) -> Optional[ProductResponse]:
         """제품 업데이트"""
         try:
+            collection = await self._get_collection()
             # 현재 제품 가져오기
-            current_product = await self.product_collection.find_one({"product_id": product_id})
+            current_product = await collection.find_one({"product_id": product_id})
             if not current_product:
                 logger.warning(f"Product not found for update: {product_id}")
                 return None
@@ -76,13 +86,13 @@ class ProductService:
             update_data["updated_at"] = datetime.now().isoformat()
             
             # 업데이트 수행
-            await self.product_collection.update_one(
+            await collection.update_one(
                 {"product_id": product_id},
                 {"$set": update_data}
             )
             
             # 업데이트된 제품 반환
-            updated_product = await self.product_collection.find_one({"product_id": product_id})
+            updated_product = await collection.find_one({"product_id": product_id})
             if "_id" in updated_product:
                 updated_product["_id"] = str(updated_product["_id"])
             
@@ -95,7 +105,8 @@ class ProductService:
     async def delete_product(self, product_id: str) -> bool:
         """제품 삭제"""
         try:
-            result = await self.product_collection.delete_one({"product_id": product_id})
+            collection = await self._get_collection()
+            result = await collection.delete_one({"product_id": product_id})
             if result.deleted_count:
                 logger.info(f"Product deleted: {product_id}")
                 return True
@@ -106,41 +117,36 @@ class ProductService:
             raise e
     
     async def get_products(self, skip: int = 0, limit: int = 100) -> List[ProductResponse]:
-        """모든 제품 목록 조회"""
+        """모든 제품 조회"""
         try:
-            cursor = self.product_collection.find().skip(skip).limit(limit)
-            products = await cursor.to_list(length=limit)
-            
-            # ObjectId를 문자열로 변환하고 ProductResponse로 변환
-            result = []
-            for product in products:
+            collection = await self._get_collection()
+            products = []
+            async for product in collection.find().skip(skip).limit(limit):
                 if "_id" in product:
                     product["_id"] = str(product["_id"])
-                result.append(ProductResponse(**product))
-            
-            logger.info(f"Retrieved {len(result)} products")
-            return result
+                products.append(ProductResponse(**product))
+            return products
         except Exception as e:
             logger.error(f"Error getting products: {str(e)}")
             raise e
     
     async def check_products_exist(self, product_ids: List[str]) -> ProductsExistResponse:
-        """여러 상품이 존재하는지 확인"""
+        """여러 제품의 존재 여부 확인"""
         try:
-            # 존재하는 제품 ID만 찾기
-            cursor = self.product_collection.find(
-                {"product_id": {"$in": product_ids}},
-                {"product_id": 1}
-            )
-            products = await cursor.to_list(length=len(product_ids))
-            existing_ids = [p["product_id"] for p in products]
+            collection = await self._get_collection()
+            existing_products = []
+            missing_products = []
             
-            missing_ids = [pid for pid in product_ids if pid not in existing_ids]
+            for product_id in product_ids:
+                product = await collection.find_one({"product_id": product_id})
+                if product:
+                    existing_products.append(product_id)
+                else:
+                    missing_products.append(product_id)
             
-            logger.info(f"Checked existence of {len(product_ids)} products. Found: {len(existing_ids)}, Missing: {len(missing_ids)}")
             return ProductsExistResponse(
-                existing_ids=existing_ids,
-                missing_ids=missing_ids
+                existing_products=existing_products,
+                missing_products=missing_products
             )
         except Exception as e:
             logger.error(f"Error checking products existence: {str(e)}")

@@ -1,10 +1,10 @@
 import os
-from pymongo import MongoClient
-from pymongo.collection import Collection
+from motor.motor_asyncio import AsyncIOMotorClient
+from motor.core import AgnosticCollection
 
-def get_users_collection() -> Collection:
+async def get_users_collection() -> AgnosticCollection:
     try:
-        mongo_client = MongoClient(
+        mongo_client = AsyncIOMotorClient(
             f"mongodb://{os.getenv('MONGODB_USERNAME')}:{os.getenv('MONGODB_PASSWORD')}@{os.getenv('MONGODB_URL')}"
         )
         db = mongo_client["user_database"]

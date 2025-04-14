@@ -1,8 +1,11 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from app.models.order import Order, OrderItem, OrderStatus
 from app.schemas.order import OrderCreate, OrderItemCreate, OrderUpdate
 from app.grpc.product_client import ProductClient
 from app.grpc.user_client import UserClient
+from app.config.kafka import get_kafka_producer, ORDER_CREATED_TOPIC
 from fastapi import HTTPException
 import asyncio
 import logging
@@ -12,10 +15,11 @@ import datetime
 logger = logging.getLogger(__name__)
 
 class OrderManager:
-    def __init__(self, session: Session):
+    def __init__(self, session: AsyncSession):
         self.session = session
         self.product_client = ProductClient()
         self.user_client = UserClient()
+        self.kafka_producer = get_kafka_producer()
     
     async def create_order(self, order_data: OrderCreate):
         logger.info("Creating a new order")
@@ -31,9 +35,10 @@ class OrderManager:
             updated_at=datetime.datetime.utcnow()
         )
         self.session.add(order)
-        self.session.flush()
+        await self.session.flush()
 
         total_amount = 0.0
+        order_items = []
         for item_data in order_data.items:
             # Check product availability and get product details in one call
             is_available, product = await self.product_client.check_availability(
@@ -53,46 +58,97 @@ class OrderManager:
             )
             self.session.add(order_item)
             total_amount += product.price * item_data.quantity
+            order_items.append({
+                'product_id': item_data.product_id,
+                'quantity': item_data.quantity,
+                'price': product.price
+            })
 
         order.total_amount = total_amount
-        self.session.commit()
+        await self.session.commit()
         logger.info(f"Order {order.order_id} created successfully")
-        return order
+
+        # Publish order created event to Kafka
+        order_created_event = {
+            'order_id': order.order_id,
+            'user_id': order.user_id,
+            'total_amount': order.total_amount,
+            'status': order.status.value,
+            'items': order_items,
+            'created_at': order.created_at.isoformat()
+        }
+        self.kafka_producer.send(ORDER_CREATED_TOPIC, order_created_event)
+        self.kafka_producer.flush()
+        logger.info(f"Published order created event for order {order.order_id}")
+
+        # Refresh the order and load its items
+        await self.session.refresh(order)
+        # Load the items relationship
+        query = (
+            select(Order)
+            .options(selectinload(Order.items))
+            .where(Order.order_id == order.order_id)
+        )
+        result = await self.session.execute(query)
+        loaded_order = result.scalar_one()
+        
+        return loaded_order
     
-    def get_order(self, order_id: int) -> Order:
+    async def get_order(self, order_id: int) -> Order:
         logger.info(f"Fetching order {order_id}")
-        order = self.session.query(Order).filter(Order.order_id == order_id).first()
+        # Load order with its items in a single query
+        query = (
+            select(Order)
+            .options(selectinload(Order.items))
+            .where(Order.order_id == order_id)
+        )
+        result = await self.session.execute(query)
+        order = result.scalar_one_or_none()
+        
         if not order:
             logger.error(f"Order {order_id} not found")
             raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+        
         return order
     
-    def get_user_orders(self, user_id: str) -> list[Order]:
+    async def get_user_orders(self, user_id: str) -> list[Order]:
         logger.info(f"Fetching orders for user {user_id}")
-        return self.session.query(Order).filter(Order.user_id == user_id).all()
+        # Load orders with their items in a single query
+        query = (
+            select(Order)
+            .options(selectinload(Order.items))
+            .where(Order.user_id == user_id)
+        )
+        result = await self.session.execute(query)
+        return result.scalars().all()
     
-    def update_order_status(self, order_id: int, status: OrderStatus) -> Order:
+    async def update_order_status(self, order_id: int, status: OrderStatus) -> Order:
         logger.info(f"Updating status for order {order_id} to {status}")
-        order = self.get_order(order_id)
+        order = await self.get_order(order_id)
         order.status = status
-        self.session.commit()
-        logger.info(f"Order {order_id} status updated to {status}")
+        await self.session.commit()
         return order
-
+    
+    async def update_order(self, order_id: str, order_update: OrderUpdate) -> Order:
+        logger.info(f"Updating order {order_id}")
+        order = await self.get_order(order_id)
+        
+        # Update order fields
+        for field, value in order_update.dict(exclude_unset=True).items():
+            setattr(order, field, value)
+        
+        order.updated_at = datetime.datetime.utcnow()
+        await self.session.commit()
+        return order
+    
+    async def delete_order(self, order_id: str):
+        logger.info(f"Deleting order {order_id}")
+        order = await self.get_order(order_id)
+        await self.session.delete(order)
+        await self.session.commit()
+    
     async def close(self):
+        """Cleanup resources"""
+        await self.session.close()
         await self.product_client.close()
         await self.user_client.close()
-
-    async def update_order(self, order_id: str, order: OrderUpdate):
-        db_order = await self.get_order(order_id)
-        for key, value in order.dict(exclude_unset=True).items():
-            setattr(db_order, key, value)
-        await self.session.commit()
-        await self.session.refresh(db_order)
-        return db_order
-
-    async def delete_order(self, order_id: str):
-        db_order = await self.get_order(order_id)
-        await self.session.delete(db_order)
-        await self.session.commit()
-        return True
