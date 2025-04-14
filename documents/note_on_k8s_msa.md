@@ -13,45 +13,6 @@ fastapi(user / product / order) + mongodb + ELK on k8s, MSA
 
 [resource](https://github.com/deshwalmahesh/fastapi-kubernetes/tree/main)
 
-## b. erd (mysql)
-categories & products & orders & order_items
-
-```sql
-categories
-----------
-category_id (PK)
-name
-parent_id (FK -> categories.category_id)
-level
-path
-
-category_products
-----------------
-product_id (PK) -> MongoDB product collection 참조
-category_id (PK, FK -> categories.category_id)
-is_primary (Boolean)
-
-orders
-------
-order_id (PK)
-user_id
-status (enum: 'pending', 'processing', 'completed', 'cancelled')
-total_amount
-created_at
-updated_at
-
-order_items
-----------
-order_item_id (PK)
-order_id (FK -> orders.order_id)
-product_id (FK -> category_products.product_id)
-quantity
-price_at_order
-created_at
-```
-
-
-
 
 # B. test 
 ## a. how to start
