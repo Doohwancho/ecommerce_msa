@@ -5,3 +5,9 @@ metadata:
   namespace: default
 data:
   KAFKA_BOOTSTRAP_SERVERS: "kafka-service:9092"
+  # Idempotent Producer 설정
+  KAFKA_ENABLE_IDEMPOTENCE: "true" # 중복 메시지 방지 기능 활성화
+  KAFKA_ACKS: "all" # 모든 브로커가 메시지 받았는지 확인
+  KAFKA_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION: "1" # 한 번에 하나의 메시지만 전송
+  # Transaction 설정
+  KAFKA_TRANSACTIONAL_ID: "order-service-producer" # 트랜잭션 아이디 설정 

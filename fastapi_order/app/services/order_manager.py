@@ -65,7 +65,18 @@ class OrderManager:
     async def _publish_kafka_event(self, topic: str, event: dict) -> None:
         """Publish event to Kafka in background"""
         try:
-            self.kafka_producer.send(topic, event)
+            # feat: 중복 방지
+            # order_id를 키로 사용해서 보내기
+            # 같은 order_id를 가진 메시지는 같은 파티션으로 가게 됨
+            # Consumer에서 order_id로 중복 체크하기 쉬워짐
+            # 메시지 순서도 보장됨 (같은 키는 같은 파티션으로 가니까)
+            # 근데 이건 완벽한 중복 방지는 아님 (네트워크 문제로 재시도하면 여전히 중복 가능)
+            # 그렇기 때문에 카프카 설정에 Idempotent 설정을 해줌 
+            self.kafka_producer.send(
+                topic,
+                key=str(event['order_id']).encode('utf-8'),  # 키로 order_id 사용
+                value=event
+            )
             self.kafka_producer.flush()
             logger.info(f"Successfully published event to Kafka topic: {topic}")
         except KafkaError as e:
