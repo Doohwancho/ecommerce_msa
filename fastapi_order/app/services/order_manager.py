@@ -2,14 +2,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from app.models.order import Order, OrderItem, OrderStatus
+from app.models.failed_event import FailedEvent
 from app.schemas.order import OrderCreate, OrderItemCreate, OrderUpdate
 from app.grpc.product_client import ProductClient
 from app.grpc.user_client import UserClient
-from app.config.kafka import get_kafka_producer, ORDER_CREATED_TOPIC
-from fastapi import HTTPException
+from app.config.kafka import get_kafka_producer, ORDER_CREATED_TOPIC, ORDER_DLQ_TOPIC
+from fastapi import HTTPException, BackgroundTasks
 import asyncio
 import logging
 import datetime
+import json
+from typing import Optional
+from kafka.errors import KafkaError
 
 # 로깅 설정
 logger = logging.getLogger(__name__)
@@ -20,8 +24,56 @@ class OrderManager:
         self.product_client = ProductClient()
         self.user_client = UserClient()
         self.kafka_producer = get_kafka_producer()
+        self.max_retries = 3
+        self.retry_delay = 1  # seconds
     
-    async def create_order(self, order_data: OrderCreate):
+    async def _store_failed_event(self, event_type: str, event_data: dict, error: str) -> None:
+        """Store failed event in database"""
+        try:
+            failed_event = FailedEvent(
+                event_type=event_type,
+                event_data=event_data,
+                error_message=error,
+                status='pending'
+            )
+            self.session.add(failed_event)
+            await self.session.commit()
+            logger.info(f"Stored failed event in database: {error}")
+        except Exception as e:
+            logger.critical(f"Failed to store event in database: {str(e)}")
+            # If database storage fails, we're in a critical situation
+            # Log the event details for manual recovery
+            logger.critical(f"Critical event loss - Event type: {event_type}, Data: {json.dumps(event_data)}")
+
+    async def _publish_to_dlq(self, event: dict, error: str) -> None:
+        """Publish failed event to Dead Letter Queue"""
+        try:
+            dlq_event = {
+                'original_event': event,
+                'error': error,
+                'timestamp': datetime.datetime.utcnow().isoformat(),
+                'retry_count': 0  # Initial retry count
+            }
+            self.kafka_producer.send(ORDER_DLQ_TOPIC, dlq_event)
+            self.kafka_producer.flush()
+            logger.info(f"Published failed event to DLQ: {error}")
+        except Exception as e:
+            logger.error(f"Failed to publish to DLQ: {str(e)}")
+            # If DLQ publishing fails, store in database
+            await self._store_failed_event('order_created', event, f"DLQ Error: {str(e)}")
+
+    async def _publish_kafka_event(self, topic: str, event: dict) -> None:
+        """Publish event to Kafka in background"""
+        try:
+            self.kafka_producer.send(topic, event)
+            self.kafka_producer.flush()
+            logger.info(f"Successfully published event to Kafka topic: {topic}")
+        except KafkaError as e:
+            logger.error(f"Failed to publish event to Kafka: {str(e)}")
+            # Try to publish to DLQ
+            await self._publish_to_dlq(event, str(e))
+
+    async def create_order(self, order_data: OrderCreate, background_tasks: BackgroundTasks):
         logger.info("Creating a new order")
         # 사용자 존재 확인
         user = await self.user_client.get_user(order_data.user_id)
@@ -68,7 +120,7 @@ class OrderManager:
         await self.session.commit()
         logger.info(f"Order {order.order_id} created successfully")
 
-        # Publish order created event to Kafka
+        # Prepare order created event
         order_created_event = {
             'order_id': order.order_id,
             'user_id': order.user_id,
@@ -77,9 +129,13 @@ class OrderManager:
             'items': order_items,
             'created_at': order.created_at.isoformat()
         }
-        self.kafka_producer.send(ORDER_CREATED_TOPIC, order_created_event)
-        self.kafka_producer.flush()
-        logger.info(f"Published order created event for order {order.order_id}")
+        
+        # Add Kafka event publishing to background tasks
+        background_tasks.add_task(
+            self._publish_kafka_event,
+            ORDER_CREATED_TOPIC,
+            order_created_event
+        )
 
         # Refresh the order and load its items
         await self.session.refresh(order)

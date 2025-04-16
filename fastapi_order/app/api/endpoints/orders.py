@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.database import get_async_mysql_db
 from app.services.order_manager import OrderManager
@@ -13,12 +13,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 @router.post("/", response_model=OrderResponse)
-async def create_order(order: OrderCreate, db: AsyncSession = Depends(get_async_mysql_db)):
+async def create_order(
+    order: OrderCreate,
+    db: AsyncSession = Depends(get_async_mysql_db),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
     logger.info("POST /api/orders/ called")
     manager = OrderManager(db)
     try:
-        new_order = await manager.create_order(order)
-        return new_order
+        return await manager.create_order(order, background_tasks)
     except Exception as e:
         logger.error(f"Error creating order: {str(e)}")
         raise HTTPException(status_code=400, detail=str(e))
