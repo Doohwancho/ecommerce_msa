@@ -5,9 +5,43 @@ metadata:
   namespace: default
 data:
   KAFKA_BOOTSTRAP_SERVERS: "kafka-service:9092"
-  # Idempotent Producer 설정
-  KAFKA_ENABLE_IDEMPOTENCE: "true" # 중복 메시지 방지 기능 활성화
   KAFKA_ACKS: "all" # 모든 브로커가 메시지 받았는지 확인
+  # Producer가 메시지 보낼 때:
+  #   Leader 브로커한테 먼저 보내짐
+  #   Leader가 Follower들한테도 복제 요청 보냄
+  #   모든 Follower들이 "나 받았어!"라고 ACK 보내면
+  #   Leader가 Producer한테 "성공!"이라고 알려줌
+  # 만약 Follower 중 하나라도 ACK 못 보내면?
+  #   Producer는 재시도함 (retry)
+  #   이 과정에서 KAFKA_ENABLE_IDEMPOTENCE가 중요해짐
+  KAFKA_ENABLE_IDEMPOTENCE: "true" # 중복 메시지 방지 기능 활성화. 이거 설정하면 Producer가 보내는 메시지마다 시퀀스 번호가 붙음
+  # Producer가 메시지 보낼 때:
+  # 1. 각 메시지마다 (PID, 시퀀스번호) 페어가 붙음
+  #   - PID: Producer ID (고유 번호)
+  #   - 시퀀스번호: 1, 2, 3... 이렇게 증가
+  # 2. 브로커는 이 번호들을 기억하고 있음
+  # 3. 같은 (PID, 시퀀스번호)가 오면?
+  #   - "아, 이건 이미 처리한 메시지네" 하고 무시함
+  # 4. 시퀀스 번호가 순서대로 안 오면?
+  #   - "이상하다? 메시지가 유실됐나?" 하고 에러 뱉음
+
+
+  # ACKS: "all"의 실제 동작방식
+  # 1. Producer -> Leader: 메시지1 보냄
+  # 2. Leader -> Follower들: 메시지1 복제 요청
+  # 3. Leader: 메시지1 ACK 기다리는 동안
+  #   - Producer -> Leader: 메시지2, 3, 4... 계속 받음
+  #   - 다른 Follower들한테도 계속 복제 요청 보냄
+  # 4. Follower들: 각자 속도대로 ACK 보냄
+  # 5. Leader: ACK 다 모이면 Producer한테 알려줌
+
+  # 성능 최적화 팁:
+  # acks=1로 설정하면 Leader만 받으면 됨 (더 빠름)
+  # 하지만 Follower들이 받기 전에 Leader가 죽으면 메시지 유실 가능
+  # acks=0로 설정하면 ACK 기다리지도 않음 (제일 빠름)
+  # 하지만 메시지 유실 가능성 높음
+  # 보통은:
+  # 중요도 높은 메시지: acks=all (안전성 우선)
+  # 중요도 낮은 메시지: acks=1 (성능 우선)
+  # 로그 같은 거: acks=0 (속도 우선)
   KAFKA_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION: "1" # 한 번에 하나의 메시지만 전송
-  # Transaction 설정
-  KAFKA_TRANSACTIONAL_ID: "order-service-producer" # 트랜잭션 아이디 설정 
