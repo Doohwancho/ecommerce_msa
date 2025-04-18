@@ -12,57 +12,43 @@ from sqlalchemy import text, MetaData, select
 
 from app.models.order import Order, OrderItem, OrderStatus
 from app.models.failed_event import FailedEvent
+# from app.models.outbox import Outbox
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-async def check_tables_async(conn):
-    """테이블 존재 여부를 비동기적으로 확인"""
-    result = await conn.execute(text("SHOW TABLES"))
-    return [row[0] for row in result]
-
-async def safe_create_tables(conn):
-    """테이블을 안전하게 생성"""
+# create table if not exist
+async def safe_create_tables_if_not_exist(conn):
     try:
-        # 테이블 존재 여부 확인 (비동기적으로 실행)
-        existing_tables = await check_tables_async(conn)
-        required_tables = ['orders', 'order_items', 'failed_events']
+        # 테이블 존재 여부 확인
+        result = await conn.execute(text("SHOW TABLES"))
+        existing_tables = [row[0] for row in result]
+        logger.info(f"Existing tables: {existing_tables}")
         
-        # 필요한 테이블이 모두 존재하는지 확인
-        if all(table in existing_tables for table in required_tables):
-            logger.info("All required tables already exist")
-            return
+        # SQLAlchemy의 checkfirst 옵션 사용 (create_all 내부적으로 IF NOT EXISTS 사용)
+        await conn.run_sync(lambda sync_conn: Base.metadata.create_all(
+            sync_conn, 
+            checkfirst=True  # 테이블이 이미 존재하면 건너뛰기
+        ))
         
-        # 테이블이 일부만 존재하는 경우, 모두 삭제하고 다시 생성
-        if any(table in existing_tables for table in required_tables):
-            logger.warning("Some tables exist but not all. Dropping all tables...")
-            for table in required_tables:
-                if table in existing_tables:
-                    await conn.execute(text(f"DROP TABLE {table}"))
-                    logger.info(f"Dropped table {table}")
+        logger.info("Tables created or already exist")
         
-        # 테이블 생성
-        async with async_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("Created all tables")
+        # 생성 후 테이블 확인
+        result = await conn.execute(text("SHOW TABLES"))
+        tables = [row[0] for row in result]
+        logger.info(f"Tables after creation: {tables}")
         
-        # 생성 확인 (비동기적으로 실행)
-        tables = await check_tables_async(conn)
-        logger.info(f"Existing tables: {tables}")
-        
-        if not all(table in tables for table in required_tables):
-            raise RuntimeError("Failed to create all required tables")
-            
     except Exception as e:
-        logger.error(f"Error creating tables: {e}")
+        logger.error(f"Error in safe_create_tables_if_not_exist: {e}")
         raise
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create database tables
     async with async_engine.begin() as conn:
-        await safe_create_tables(conn)
+        # await safe_create_tables(conn)
+        await safe_create_tables_if_not_exist(conn)
     
     # Start event retry service
     asyncio.create_task(start_event_retry_service())
