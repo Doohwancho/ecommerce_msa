@@ -14,6 +14,11 @@ class OrderCreate(BaseModel):
 class OrderUpdate(BaseModel):
     status: OrderStatus
 
+class OrderCreateResponse(BaseModel):
+    order_id: int
+    status: str
+    message: str
+
 class OrderItemResponse(BaseModel):
     order_item_id: int
     product_id: str

@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 
 # Database configuration
 MYSQL_USER = os.getenv('MYSQL_USER', 'root')
-MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD', 'password')
+MYSQL_PASSWORD = os.getenv('MYSQL_PASSWORD', 'root')
 MYSQL_HOST = os.getenv('MYSQL_HOST', 'mysql-service')
 MYSQL_PORT = os.getenv('MYSQL_PORT', '3306')
 MYSQL_DATABASE = os.getenv('MYSQL_DATABASE', 'product_category')

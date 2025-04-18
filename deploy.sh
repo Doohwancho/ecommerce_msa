@@ -65,6 +65,11 @@ kubectl delete services mysql-service || true
 # kubectl delete services logstash-service || true
 # kubectl delete services elasticsearch-service || true
 
+# Delete Debezium resources
+kubectl delete job register-debezium-connector --ignore-not-found=true
+kubectl delete deployment debezium-connect --ignore-not-found=true
+kubectl delete service debezium-connect --ignore-not-found=true
+
 # Delete all StatefulSets
 # kubectl delete  statefulset mongodb-stateful || true
 kubectl delete statefulsets --all
@@ -168,6 +173,51 @@ kubectl apply -f ./k8_configs/fastapi_order_deployment.yaml
 # kubectl apply -f ./k8_configs/elastic_depl_serv.yaml # Elastic Search
 # kubectl apply -f ./k8_configs/logstash_depl_serv.yaml  # Logstash
 # kubectl apply -f ./k8_configs/kibana_depl_serv.yaml  # kibana dashboard
+
+
+# --- DEBEZIUM DEPLOYMENT PHASE (Revised) ---
+echo "Deploying Debezium Connect..."
+# 1. Apply the Debezium Deployment and Service (ensure this file DOES NOT have the initContainer)
+kubectl apply -f ./k8_configs/debezium-deployment.yaml
+
+# 2. Wait for the Debezium Connect Deployment to be available and ready
+echo "Waiting for Debezium Connect Deployment to be available..."
+if ! kubectl wait --for=condition=Available deployment/debezium-connect --timeout=300s; then
+  echo "ERROR: Debezium Connect Deployment did not become available in time."
+  kubectl get pods -l app=debezium-connect
+  kubectl describe deployment debezium-connect
+  exit 1
+fi
+echo "Debezium Connect Deployment is available. Waiting a bit for service readiness..."
+sleep 15 # Give the service endpoint a moment to stabilize after pods are ready
+
+# 3. Apply the Connector Registration Job (ensure this file uses the correct service name: debezium-connect)
+echo "Applying Debezium connector registration Job..."
+kubectl apply -f ./k8_configs/register-connector-job.yaml # Assuming you named the job file this
+
+# 4. Optional: Wait for the Job to complete
+echo "Waiting for connector registration Job to complete..."
+if ! kubectl wait --for=condition=complete job/register-debezium-connector --timeout=180s; then
+   echo "WARNING: Connector registration Job did not complete successfully in time."
+   # Attempt to get logs from the job's pod
+   JOB_POD=$(kubectl get pods --selector=job-name=register-debezium-connector --output=jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+   if [ -n "$JOB_POD" ]; then
+       echo "Logs from Job Pod ($JOB_POD):"
+       kubectl logs $JOB_POD
+   else
+       echo "Could not find Job Pod to retrieve logs."
+   fi
+   # Decide if this is a fatal error or just a warning
+   # exit 1 # Uncomment if registration failure should stop the script
+else
+   echo "Connector registration Job completed successfully."
+   # Optional: Clean up the completed job if you don't need its logs/status later
+   # echo "Deleting completed connector registration job..."
+   # kubectl delete job register-debezium-connector --ignore-not-found=true
+fi
+# --- END DEBEZIUM DEPLOYMENT ---
+
+
 kubectl apply -f ./k8_configs/ingress.yaml # Enable ingress for routing
 
 echo "All deployments completed. Checking pod status:"

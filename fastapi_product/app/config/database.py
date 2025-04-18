@@ -7,7 +7,7 @@ from motor.core import AgnosticCollection
 
 # MySQL 비동기 설정
 MYSQL_USER = os.getenv("MYSQL_USER", "root")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "password")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "root")
 MYSQL_HOST = os.getenv("MYSQL_HOST", "mysql-service")
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "product_category")
 SQLALCHEMY_DATABASE_URL = f"mysql+aiomysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}/{MYSQL_DATABASE}?charset=utf8mb4"
