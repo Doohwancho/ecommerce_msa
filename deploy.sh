@@ -35,6 +35,12 @@ docker build --no-cache -t fastapi-order-service:latest ./fastapi_order/.
 docker tag fastapi-order-service:latest doohwancho/fastapi-order-service:latest
 docker push doohwancho/fastapi-order-service:latest
 
+# 결제 서비스 빌드
+echo "Building payment service..."
+docker build --no-cache -t fastapi-payment-service:latest ./fastapi_payment/.
+docker tag fastapi-payment-service:latest doohwancho/fastapi-payment-service:latest
+docker push doohwancho/fastapi-payment-service:latest
+
 
 
 # Delete all the Kubernetes deployments
@@ -165,6 +171,7 @@ kubectl apply -f ./k8_configs/mongo_express_depl_serv.yaml # One file for both d
 kubectl apply -f ./k8_configs/fastapi_user_deployment.yaml
 kubectl apply -f ./k8_configs/fastapi_product_deployment.yaml
 kubectl apply -f ./k8_configs/fastapi_order_deployment.yaml
+kubectl apply -f ./k8_configs/fastapi_payment_deployment.yaml
 # kubectl apply -f ./k8_configs/fastapi_deployment_file.yaml # FastAPI Deployment pod
 # kubectl apply -f ./k8_configs/fastapi_service_file.yaml # FastAPI service
 
