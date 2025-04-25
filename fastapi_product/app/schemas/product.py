@@ -1,29 +1,52 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
-from app.models.product import ProductWeight, ProductDimension, ProductPrice, ProductImage, ProductVariant
+from typing import List, Optional, Dict
+from datetime import datetime
+
+class Price(BaseModel):
+    amount: float
+    currency: str
+
+class Weight(BaseModel):
+    value: float
+    unit: str
+
+class Dimensions(BaseModel):
+    length: float
+    width: float
+    height: float
+    unit: str
+
+class Image(BaseModel):
+    url: str
+    main: bool
+
+class Variant(BaseModel):
+    id: str
+    sku: str
+    color: str
+    storage: str
+    price: Price
+    attributes: Dict[str, str]
+    inventory: int
 
 class ProductCreate(BaseModel):
     title: str
-    description: Optional[str] = None
+    description: str
     brand: Optional[str] = None
     model: Optional[str] = None
     sku: Optional[str] = None
     upc: Optional[str] = None
-    ean: Optional[str] = None
-    asin: Optional[str] = None
     color: Optional[str] = None
-    weight: Optional[ProductWeight] = None
-    dimensions: Optional[ProductDimension] = None
-    price: ProductPrice
-    stock: int = Field(default=0, ge=0)
-    discount: Optional[float] = None
-    estimated_sales_revenue: Optional[float] = None
-    estimated_unit_sold: Optional[int] = None
     category_ids: List[int] = []
     primary_category_id: Optional[int] = None
-    attributes: Dict[str, Any] = {}
-    variants: List[ProductVariant] = []
-    images: List[ProductImage] = []
+    category_breadcrumbs: Optional[List[str]] = None
+    price: Price
+    stock: int = Field(default=0, ge=0)
+    weight: Optional[Weight] = None
+    dimensions: Optional[Dimensions] = None
+    attributes: Optional[Dict[str, str]] = None
+    variants: Optional[List[Variant]] = None
+    images: Optional[List[Image]] = None
 
 class ProductUpdate(BaseModel):
     title: Optional[str] = None
@@ -32,48 +55,43 @@ class ProductUpdate(BaseModel):
     model: Optional[str] = None
     sku: Optional[str] = None
     upc: Optional[str] = None
-    ean: Optional[str] = None
-    asin: Optional[str] = None
     color: Optional[str] = None
-    weight: Optional[ProductWeight] = None
-    dimensions: Optional[ProductDimension] = None
-    price: Optional[ProductPrice] = None
-    stock: Optional[int] = Field(default=None, ge=0)
-    discount: Optional[float] = None
-    estimated_sales_revenue: Optional[float] = None
-    estimated_unit_sold: Optional[int] = None
     category_ids: Optional[List[int]] = None
     primary_category_id: Optional[int] = None
-    attributes: Optional[Dict[str, Any]] = None
-    variants: Optional[List[ProductVariant]] = None
-    images: Optional[List[ProductImage]] = None
+    category_breadcrumbs: Optional[List[str]] = None
+    price: Optional[Price] = None
+    stock: Optional[int] = Field(default=None, ge=0)
+    weight: Optional[Weight] = None
+    dimensions: Optional[Dimensions] = None
+    attributes: Optional[Dict[str, str]] = None
+    variants: Optional[List[Variant]] = None
+    images: Optional[List[Image]] = None
 
 class ProductResponse(BaseModel):
     product_id: str
     title: str
-    description: Optional[str] = None
+    description: str
     brand: Optional[str] = None
     model: Optional[str] = None
     sku: Optional[str] = None
     upc: Optional[str] = None
-    ean: Optional[str] = None
-    asin: Optional[str] = None
     color: Optional[str] = None
-    weight: Optional[ProductWeight] = None
-    dimensions: Optional[ProductDimension] = None
-    price: ProductPrice
-    stock: int = Field(default=0, ge=0)
-    discount: Optional[float] = None
-    estimated_sales_revenue: Optional[float] = None
-    estimated_unit_sold: Optional[int] = None
     category_ids: List[int] = []
     primary_category_id: Optional[int] = None
     category_breadcrumbs: Optional[List[str]] = None
-    attributes: Dict[str, Any] = {}
-    variants: List[ProductVariant] = []
-    images: List[ProductImage] = []
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
+    price: Price
+    weight: Optional[Weight] = None
+    dimensions: Optional[Dimensions] = None
+    attributes: Optional[Dict[str, str]] = None
+    variants: Optional[List[Variant]] = None
+    images: Optional[List[Image]] = None
+    created_at: Optional[datetime] = None
+
+class ProductInventoryResponse(BaseModel):
+    product_id: str
+    stock: int = Field(default=0, ge=0)
+    stock_reserved: int = Field(default=0, ge=0)
+    available_stock: int = Field(default=0, ge=0)  # stock - stock_reserved
 
 class ProductsExistRequest(BaseModel):
     product_ids: List[str]
@@ -81,3 +99,7 @@ class ProductsExistRequest(BaseModel):
 class ProductsExistResponse(BaseModel):
     existing_ids: List[str]
     missing_ids: List[str]
+
+# class ConfirmInventoryResponse(BaseModel):
+#     success: bool
+#     message: str

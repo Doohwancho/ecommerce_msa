@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config.database import get_async_mysql_db
 from app.services.order_manager import OrderManager
-from app.schemas import OrderCreate, OrderCreateResponse, OrderResponse
-from app.models.order import OrderStatus
+from app.schemas import OrderCreate, OrderCreateResponse, OrderResponse, TestOrderCreate, TestOrderItemCreate
+from app.models.order import OrderStatus, OrderItem
 from typing import List
 import logging
 
@@ -62,3 +62,34 @@ async def update_order_status(
     except Exception as e:
         logger.error(f"Error updating order status: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# @router.post("/test/saga", response_model=OrderResponse)
+# async def create_test_order_for_saga(
+#     order_data: TestOrderCreate,
+#     db: AsyncSession = Depends(get_async_mysql_db)
+# ):
+#     """
+#     SAGA 패턴 테스트를 위한 특별한 엔드포인트.
+#     quantity validation을 우회하여 0 quantity 주문을 생성할 수 있습니다.
+#     """
+#     logger.info("Creating test order for SAGA pattern testing")
+#     manager = OrderManager(db)
+#     try:
+#         # quantity validation을 우회하기 위해 직접 OrderItem 객체 생성
+#         order_items = [
+#             TestOrderItemCreate(
+#                 product_id=item.product_id,
+#                 quantity=item.quantity
+#             ) for item in order_data.items
+#         ]
+        
+#         # OrderCreate 객체를 수정하여 validation을 우회
+#         test_order_data = OrderCreate(
+#             user_id=order_data.user_id,
+#             items=order_items
+#         )
+        
+#         return await manager.create_order(test_order_data)
+#     except Exception as e:
+#         logger.error(f"Error creating test order: {str(e)}")
+#         raise HTTPException(status_code=500, detail=str(e))

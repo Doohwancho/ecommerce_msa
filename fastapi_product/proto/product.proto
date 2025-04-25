@@ -4,7 +4,12 @@ package product;
 
 service ProductService {
   rpc GetProduct(ProductRequest) returns (ProductResponse) {}
+  rpc GetProductInventory(ProductRequest) returns (ProductInventoryResponse) {}
   rpc CheckProductAvailability(ProductAvailabilityRequest) returns (ProductAvailabilityResponse) {}
+  rpc ReserveInventory(InventoryRequest) returns (InventoryResponse);
+  rpc ReleaseInventory(InventoryRequest) returns (InventoryResponse); 
+  rpc ConfirmInventory(InventoryRequest) returns (InventoryResponse);
+  rpc CheckAndReserveInventory(InventoryRequest) returns (InventoryResponse);
 }
 
 message ProductRequest {
@@ -15,7 +20,13 @@ message ProductResponse {
   string product_id = 1;
   string title = 2;
   double price = 3;
-  int32 stock = 4;
+}
+
+message ProductInventoryResponse {
+  string product_id = 1;
+  int32 stock = 2;
+  int32 stock_reserved = 3;
+  int32 available_stock = 4;
 }
 
 message ProductAvailabilityRequest {
@@ -27,3 +38,13 @@ message ProductAvailabilityResponse {
   bool available = 1;
   string message = 2;
 } 
+
+message InventoryRequest {
+  string product_id = 1;
+  int32 quantity = 2;
+}
+
+message InventoryResponse {
+  bool success = 1;
+  string message = 2;
+}

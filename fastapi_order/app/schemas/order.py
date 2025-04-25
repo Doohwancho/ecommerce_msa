@@ -5,7 +5,7 @@ from app.models.order import OrderStatus
 
 class OrderItemCreate(BaseModel):
     product_id: str
-    quantity: int = Field(gt=0)
+    quantity: int
 
 class OrderCreate(BaseModel):
     user_id: str
@@ -39,4 +39,13 @@ class OrderResponse(BaseModel):
     items: List[OrderItemResponse]
 
     class Config:
-        orm_mode = True 
+        orm_mode = True
+
+# SAGA 테스트를 위한 모델
+class TestOrderItemCreate(BaseModel):
+    product_id: str
+    quantity: int  # validation 없음
+
+class TestOrderCreate(BaseModel):
+    user_id: str
+    items: List[TestOrderItemCreate] 

@@ -1,42 +1,69 @@
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 from bson import ObjectId
 from datetime import datetime
-from app.schemas.product import ProductCreate, ProductUpdate, ProductResponse, ProductsExistResponse
-from app.config.database import get_product_collection
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.schemas.product import ProductCreate, ProductUpdate, ProductResponse, ProductsExistResponse, ProductInventoryResponse
+from app.config.database import get_product_collection, get_mysql_db
+from app.models.product import Product as MySQLProduct
 from app.config.logging import logger
 
 class ProductService:
     def __init__(self):
         self.product_collection = None
+        self.db = None
     
     async def _get_collection(self):
         if self.product_collection is None:
             self.product_collection = await get_product_collection()
             if self.product_collection is None:
-                raise Exception("Database connection failed")
+                raise Exception("MongoDB connection failed")
         return self.product_collection
     
+    async def _get_db(self):
+        if self.db is None:
+            self.db = await get_mysql_db()
+            if self.db is None:
+                raise Exception("MySQL connection failed")
+        return self.db
+    
     async def create_product(self, product: ProductCreate) -> ProductResponse:
-        """새로운 제품 생성"""
+        """새로운 제품 생성 (MongoDB와 MySQL에 동시 저장)"""
         try:
+            # MongoDB에 저장
             product_dict = product.dict()
-            
-            # 제품 ID 생성
             product_id = f"P{ObjectId()}"
             product_dict["product_id"] = product_id
-            
-            # 타임스탬프 추가
             current_time = datetime.now().isoformat()
             product_dict["created_at"] = current_time
-            product_dict["updated_at"] = current_time
             
-            # MongoDB에 저장
+            # MongoDB에서는 stock 정보 제외
+            if "stock" in product_dict:
+                del product_dict["stock"]
+            
             collection = await self._get_collection()
             await collection.insert_one(product_dict)
             
-            logger.info(f"Product created: {product_id}")
-            # 삽입된 문서 반환
-            return ProductResponse(**product_dict)
+            # MySQL에 저장
+            db = await self._get_db()
+            mysql_product = MySQLProduct(
+                product_id=product_id,
+                title=product.title,
+                description=product.description,
+                price=int(product.price.amount),  # Float를 Integer로 변환
+                stock=product.stock,
+                stock_reserved=0,  # 초기 예약 재고는 0
+                created_at=datetime.now()
+                # updated_at은 자동으로 업데이트됨
+            )
+            db.add(mysql_product)
+            await db.commit()
+            await db.refresh(mysql_product)
+            
+            logger.info(f"Product created in both MongoDB and MySQL: {product_id}")
+            
+            # 응답 생성 시 stock 정보 제외
+            response_data = product_dict.copy()
+            return ProductResponse(**response_data)
         except Exception as e:
             logger.error(f"Error creating product: {str(e)}")
             raise e
@@ -50,26 +77,102 @@ class ProductService:
                 # ObjectId를 문자열로 변환
                 if "_id" in product:
                     product["_id"] = str(product["_id"])
+                
+                # MongoDB에서 가져온 데이터를 ProductResponse 형식에 맞게 변환
+                response_data = {
+                    "product_id": product.get("product_id", ""),
+                    "title": product.get("title", ""),
+                    "description": product.get("description", ""),
+                    "brand": product.get("brand"),
+                    "model": product.get("model"),
+                    "sku": product.get("sku"),
+                    "upc": product.get("upc"),
+                    "color": product.get("color"),
+                    "category_ids": product.get("category_ids", []),
+                    "primary_category_id": product.get("primary_category_id"),
+                    "category_breadcrumbs": product.get("category_breadcrumbs"),
+                    "price": {
+                        "amount": product.get("price", {}).get("amount", 0.0),
+                        "currency": product.get("price", {}).get("currency", "USD")
+                    },
+                    "weight": product.get("weight"),
+                    "dimensions": product.get("dimensions"),
+                    "attributes": product.get("attributes"),
+                    "variants": product.get("variants"),
+                    "images": product.get("images"),
+                    "created_at": product.get("created_at")
+                }
+                
                 logger.info(f"Product found: {product_id}")
-                return ProductResponse(**product)
+                return ProductResponse(**response_data)
             logger.warning(f"Product not found: {product_id}")
             return None
         except Exception as e:
             logger.error(f"Error getting product {product_id}: {str(e)}")
             raise e
     
-    async def check_availability(self, product_id: str, quantity: int) -> bool:
+    async def check_availability(self, product_id: str, quantity: int) -> tuple[bool, Optional[ProductResponse]]:
         """
         제품이 지정된 수량만큼 재고가 있는지 확인합니다.
+        가용 재고 = 총 재고 - 예약된 재고
+        
+        Args:
+            product_id: 제품 ID
+            quantity: 확인할 수량
+            
+        Returns:
+            tuple: (가용성 여부, 제품 정보)
         """
         try:
             product = await self.get_product(product_id)
             if not product:
-                return False
-            return product.stock >= quantity
+                return False, None
+            
+            # 가용 재고 = 총 재고 - 예약된 재고
+            available_stock = product.stock - product.stock_reserved
+            is_available = available_stock >= quantity
+            
+            logger.info(f"Product {product_id} availability check: requested={quantity}, available={available_stock}, result={is_available}")
+            return is_available, product
         except Exception as e:
             logger.error(f"제품 재고 확인 중 오류 발생: {e}")
-            return False
+            return False, None
+
+    async def check_and_reserve_inventory(self, product_id: str, quantity: int) -> tuple[bool, str]:
+        """
+        제품 재고 확인과 예약을 한 번에 수행합니다.
+        MySQL에서만 재고를 관리합니다.
+        
+        Args:
+            product_id: 제품 ID
+            quantity: 요청 수량
+            
+        Returns:
+            tuple: (성공 여부, 메시지)
+        """
+        try:
+            db = await self._get_db()
+            
+            # MySQL에서 제품 조회
+            mysql_product = await db.get(MySQLProduct, product_id)
+            if not mysql_product:
+                return False, f"Product {product_id} not found"
+            
+            # 가용 재고 확인
+            available_stock = mysql_product.stock - mysql_product.stock_reserved
+            if available_stock < quantity:
+                return False, f"Insufficient stock: requested {quantity}, available {available_stock}"
+            
+            # 재고 예약
+            mysql_product.stock_reserved += quantity
+            await db.commit()
+            
+            logger.info(f"Successfully checked and reserved {quantity} items for product {product_id}")
+            return True, f"Successfully reserved {quantity} items"
+                
+        except Exception as e:
+            logger.error(f"Error checking and reserving inventory: {str(e)}")
+            return False, str(e)
 
     async def update_product(self, product_id: str, product_update: ProductUpdate) -> Optional[ProductResponse]:
         """제품 업데이트"""
@@ -83,7 +186,6 @@ class ProductService:
             
             # 업데이트할 필드
             update_data = {k: v for k, v in product_update.dict(exclude_unset=True).items()}
-            update_data["updated_at"] = datetime.now().isoformat()
             
             # 업데이트 수행
             await collection.update_one(
@@ -124,7 +226,32 @@ class ProductService:
             async for product in collection.find().skip(skip).limit(limit):
                 if "_id" in product:
                     product["_id"] = str(product["_id"])
-                products.append(ProductResponse(**product))
+                
+                # MongoDB에서 가져온 데이터를 ProductResponse 형식에 맞게 변환
+                response_data = {
+                    "product_id": product.get("product_id", ""),
+                    "title": product.get("title", ""),
+                    "description": product.get("description", ""),
+                    "brand": product.get("brand"),
+                    "model": product.get("model"),
+                    "sku": product.get("sku"),
+                    "upc": product.get("upc"),
+                    "color": product.get("color"),
+                    "category_ids": product.get("category_ids", []),
+                    "primary_category_id": product.get("primary_category_id"),
+                    "category_breadcrumbs": product.get("category_breadcrumbs"),
+                    "price": {
+                        "amount": product.get("price", {}).get("amount", 0.0),
+                        "currency": product.get("price", {}).get("currency", "USD")
+                    },
+                    "weight": product.get("weight"),
+                    "dimensions": product.get("dimensions"),
+                    "attributes": product.get("attributes"),
+                    "variants": product.get("variants"),
+                    "images": product.get("images"),
+                    "created_at": product.get("created_at")
+                }
+                products.append(ProductResponse(**response_data))
             return products
         except Exception as e:
             logger.error(f"Error getting products: {str(e)}")
@@ -145,9 +272,177 @@ class ProductService:
                     missing_products.append(product_id)
             
             return ProductsExistResponse(
-                existing_products=existing_products,
-                missing_products=missing_products
+                existing_ids=existing_products,
+                missing_ids=missing_products
             )
         except Exception as e:
             logger.error(f"Error checking products existence: {str(e)}")
             raise e
+
+    async def reserve_inventory(self, product_id: str, quantity: int) -> bool:
+        """
+        주문 생성 시 재고를 예약합니다.
+        
+        Args:
+            product_id: 제품 ID
+            quantity: 예약할 수량
+            
+        Returns:
+            bool: 예약 성공 여부
+        """
+        try:
+            db = await self._get_db()
+            
+            # MySQL에서 제품 조회
+            mysql_product = await db.get(MySQLProduct, product_id)
+            if not mysql_product:
+                logger.warning(f"Product {product_id} not found in MySQL")
+                return False
+            
+            # 가용 재고 확인 (총 재고 - 예약 재고)
+            available_stock = mysql_product.stock - mysql_product.stock_reserved
+            if available_stock < quantity:
+                logger.warning(f"Insufficient available stock for product {product_id}: requested {quantity}, available {available_stock}")
+                return False
+            
+            # 재고 예약 (stock_reserved 증가)
+            mysql_product.stock_reserved += quantity
+            await db.commit()
+            
+            logger.info(f"Successfully reserved {quantity} items for product {product_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error reserving inventory for product {product_id}: {str(e)}")
+            return False
+
+    async def release_inventory(self, product_id: str, quantity: int) -> bool:
+        """
+        주문 취소 시 예약된 재고를 해제합니다 (SAGA 롤백).
+        MySQL에서만 재고를 관리합니다.
+        
+        Args:
+            product_id: 제품 ID
+            quantity: 해제할 수량
+            
+        Returns:
+            bool: 해제 성공 여부
+        """
+        try:
+            db = await self._get_db()
+            
+            # MySQL에서 제품 조회
+            mysql_product = await db.get(MySQLProduct, product_id)
+            if not mysql_product:
+                logger.warning(f"Product {product_id} not found in MySQL")
+                return False
+                
+            # 예약된 재고가 충분한지 확인
+            if mysql_product.stock_reserved < quantity:
+                logger.warning(f"Cannot release more than reserved: product {product_id}, requested {quantity}, reserved {mysql_product.stock_reserved}")
+                return False
+                
+            # MySQL 재고 예약 업데이트 (stock_reserved 감소)
+            mysql_product.stock_reserved -= quantity
+            await db.commit()
+                
+            logger.info(f"Successfully released {quantity} reserved items for product {product_id}")
+            return True
+                
+        except Exception as e:
+            logger.error(f"Error releasing inventory for product {product_id}: {str(e)}")
+            return False
+
+    async def confirm_inventory(self, product_id: str, quantity: int) -> bool:
+        """
+        주문 확정 시 예약된 재고를 실제 재고에서 차감합니다.
+        MySQL에서만 재고를 관리합니다.
+        
+        Args:
+            product_id: 제품 ID
+            quantity: 확정할 수량
+            
+        Returns:
+            bool: 확정 성공 여부
+        """
+        try:
+            db = await self._get_db()
+            
+            # MySQL에서 제품 조회
+            mysql_product = await db.get(MySQLProduct, product_id)
+            if not mysql_product:
+                logger.warning(f"Product {product_id} not found in MySQL")
+                return False
+            
+            # 예약된 재고와 실제 재고 확인
+            if mysql_product.stock_reserved < quantity or mysql_product.stock < quantity:
+                logger.warning(f"Cannot confirm inventory: product {product_id}, requested {quantity}, reserved {mysql_product.stock_reserved}, total {mysql_product.stock}")
+                return False
+            
+            # 재고 확정 (stock과 stock_reserved 모두 감소)
+            mysql_product.stock -= quantity
+            mysql_product.stock_reserved -= quantity
+            await db.commit()
+            
+            logger.info(f"Successfully confirmed {quantity} items for product {product_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error confirming inventory for product {product_id}: {str(e)}")
+            return False
+
+    async def get_product_inventory(self, product_id: str) -> Optional[ProductInventoryResponse]:
+        """제품의 재고 정보 조회"""
+        try:
+            db = await self._get_db()
+            mysql_product = await db.get(MySQLProduct, product_id)
+            if not mysql_product:
+                logger.warning(f"Product {product_id} not found in MySQL")
+                return None
+            
+            return ProductInventoryResponse(
+                product_id=product_id,
+                stock=mysql_product.stock,
+                stock_reserved=mysql_product.stock_reserved,
+                available_stock=mysql_product.stock - mysql_product.stock_reserved
+            )
+        except Exception as e:
+            logger.error(f"Error getting product inventory {product_id}: {str(e)}")
+            raise e
+
+    async def update_stock_after_order(self, db: AsyncSession, product_id: str, quantity: int) -> bool:
+        """
+        주문 성공 시 재고를 차감합니다.
+        stock과 stock_reserved 모두에서 quantity를 차감합니다.
+        
+        Args:
+            db: 데이터베이스 세션
+            product_id: 제품 ID
+            quantity: 차감할 수량
+            
+        Returns:
+            bool: 성공 여부
+        """
+        try:
+            # MySQL에서 제품 조회
+            mysql_product = await db.get(MySQLProduct, product_id)
+            if not mysql_product:
+                logger.warning(f"Product {product_id} not found in MySQL")
+                return False
+            
+            # 예약된 재고와 실제 재고 확인
+            if mysql_product.stock_reserved < quantity or mysql_product.stock < quantity:
+                logger.warning(f"Cannot update stock: product {product_id}, requested {quantity}, reserved {mysql_product.stock_reserved}, total {mysql_product.stock}")
+                return False
+            
+            # 재고 차감 (stock과 stock_reserved 모두 감소)
+            mysql_product.stock -= quantity
+            mysql_product.stock_reserved -= quantity
+            await db.commit()
+            
+            logger.info(f"Successfully updated stock for product {product_id}: stock={mysql_product.stock}, stock_reserved={mysql_product.stock_reserved}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating stock for product {product_id}: {str(e)}")
+            return False

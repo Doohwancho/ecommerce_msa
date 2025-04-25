@@ -17,7 +17,14 @@ class UserService(user_pb2_grpc.UserServiceServicer):
     async def GetUser(self, request, context):
         try:
             logger.info(f"GetUser request received for user_id: {request.user_id}")
-            user = await self.user_manager.get_user_by_id(request.user_id)
+            try:
+                user = await self.user_manager.get_user_by_id(request.user_id)
+            except Exception as e:
+                logger.error(f"Error converting user_id to ObjectId: {str(e)}")
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(f"Invalid user ID format: {str(e)}")
+                return user_pb2.UserResponse()
+                
             if not user:
                 logger.warning(f"User not found: {request.user_id}")
                 context.set_code(grpc.StatusCode.NOT_FOUND)

@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 
 from app.config.database import get_mysql_db
-from app.models.category import Category
+from app.models.product import Category
 from app.schemas.category import CategoryCreate, CategoryResponse, ProductCategoryBase, ProductCategoryResponse
 from app.services.category_service import CategoryManager
 from app.config.logging import logger

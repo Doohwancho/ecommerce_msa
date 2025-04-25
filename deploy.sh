@@ -85,8 +85,8 @@ kubectl delete statefulsets --all
 # docker build --no-cache -t fastapi-image-test-k8 ./fastapi_monolith/.
 
 # Tag and push the Docker image
-docker tag fastapi-image-test-k8 doohwancho/fastapi-image-test-k8
-docker push doohwancho/fastapi-image-test-k8
+# docker tag fastapi-image-test-k8 doohwancho/fastapi-image-test-k8
+# docker push doohwancho/fastapi-image-test-k8
 
 # Apply all the files in stepwise manner
 # kubectl apply -f ./k8_configs/storage-class.yaml
@@ -200,7 +200,7 @@ sleep 15 # Give the service endpoint a moment to stabilize after pods are ready
 
 # 3. Apply the Connector Registration Job (ensure this file uses the correct service name: debezium-connect)
 echo "Applying Debezium connector registration Job..."
-kubectl apply -f ./k8_configs/register-connector-job.yaml # Assuming you named the job file this
+kubectl apply -f ./k8_configs/debezium-register-connector-job.yaml # Assuming you named the job file this
 
 # 4. Optional: Wait for the Job to complete
 echo "Waiting for connector registration Job to complete..."

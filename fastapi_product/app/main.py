@@ -1,78 +1,102 @@
-from fastapi import FastAPI, Depends
-from sqlalchemy.orm import Session
+from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.api import api_router
-from app.config.database import Base, engine, get_mysql_db, get_async_mysql_db
-from app.core.init_db import initialize_categories, create_mongodb_indexes
-import logging
-import asyncio
-import uvicorn
-# gRPC server import
-from app.grpc.product_server import serve as grpc_serve
+from app.config.database import Base, engine
+from app.services.product_manager import ProductManager
 from contextlib import asynccontextmanager
+from app.config.logging import logger
+from sqlalchemy import text
+import os
+import asyncio
+from app.grpc.product_server import serve as grpc_serve
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# Global variable to store the gRPC server task
-grpc_task = None
+async def safe_create_tables_if_not_exist(conn):
+    """테이블이 존재하지 않는 경우에만 생성"""
+    try:
+        # 기존 테이블 확인
+        result = await conn.execute(text("SHOW TABLES"))
+        existing_tables = [row[0] for row in result]
+        logger.info(f"Existing tables: {existing_tables}")
+        
+        # SQLAlchemy의 checkfirst 옵션 사용
+        await conn.run_sync(lambda sync_conn: Base.metadata.create_all(
+            sync_conn, 
+            checkfirst=True  # 테이블이 이미 존재하면 건너뛰기
+        ))
+        
+        logger.info("Tables created or already exist")
+        
+        # 생성 후 테이블 확인
+        result = await conn.execute(text("SHOW TABLES"))
+        tables = [row[0] for row in result]
+        logger.info(f"Tables after creation: {tables}")
+        
+    except Exception as e:
+        logger.error(f"Error creating tables: {e}")
+        raise
 
-# Use FastAPI's lifespan to manage the gRPC server
+# 전역 변수로 ProductManager 인스턴스 생성
+product_manager = ProductManager()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start gRPC server in background
-    global grpc_task
-    logger.info("Starting gRPC server in background")
-    grpc_task = asyncio.create_task(grpc_serve())
-    
-    # Create database tables
+    """애플리케이션 생명주기 관리"""
+    # 시작 시 테이블 생성
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await safe_create_tables_if_not_exist(conn)
+    
+    # Start gRPC server in background
+    grpc_task = asyncio.create_task(grpc_serve())
+    logger.info("gRPC server started on port 50051")
+
+    # Kafka 초기화
+    bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS")
+    group_id = "product-service-group"
+    await product_manager.initialize_kafka(bootstrap_servers, group_id)
+    logger.info("Kafka consumer initialized")
     
     yield
     
-    # Cleanup when FastAPI shuts down
+    # 종료 시 Kafka consumer 정리
+    await product_manager.stop()
+    logger.info("Kafka consumer stopped")
+
+    # Cancel gRPC task
     if grpc_task:
-        logger.info("Shutting down gRPC server")
         grpc_task.cancel()
         try:
             await grpc_task
         except asyncio.CancelledError:
-            logger.info("gRPC server task cancelled")
+            logger.info("gRPC server stopped")
 
-# Create application with lifespan handler
-app = FastAPI(title="Product Service API", lifespan=lifespan)
+# FastAPI 애플리케이션 생성
+app = FastAPI(
+    title="Product Service API",
+    description="상품 서비스 API",
+    version="1.0.0",
+    lifespan=lifespan
+)
 
-# API router registration
+# API 라우터 등록
 app.include_router(api_router, prefix="/api")
 
+# 헬스 체크 엔드포인트
 @app.get("/health")
-def health_check():
-    logger.info("Health check endpoint called")
-    return {"status": "OK"}
+async def health_check():
+    """서비스 상태 확인"""
+    return {"status": "healthy"}
 
+# 루트 엔드포인트
 @app.get("/")
-def read_root():
-    logger.info("Root endpoint called")
-    return {"message": "Welcome to the Product Service API"}
-
-# Initialize during startup
-@app.on_event("startup")
-async def startup_event():
-    # Create MongoDB indexes
-    await create_mongodb_indexes()
-    
-    # Initialize categories
-    async_session = await get_async_mysql_db()
-    await initialize_categories(async_session)
-
-# Initialize data endpoint (call only when needed)
-@app.post("/init-data")
-async def initialize_data(db: AsyncSession = Depends(get_async_mysql_db)):
-    await initialize_categories(db)
-    return {"message": "Data initialized successfully"}
+async def read_root():
+    """API 루트 엔드포인트"""
+    return {
+        "message": "Welcome to Product Service API",
+        "docs": "/docs",
+        "redoc": "/redoc"
+    }
 
 if __name__ == "__main__":
-    # Run only FastAPI - the gRPC server will be started by the lifespan handler
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, log_level="info")
+    import uvicorn
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8004, reload=True)

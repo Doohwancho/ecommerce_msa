@@ -13,6 +13,8 @@ from app.schemas.payment_schemas import (
 from app.models.payment_model import Payment, PaymentTransaction
 from app.config.payment_database import get_async_mysql_db
 from app.config.payment_logging import logger
+import uuid
+from app.models.outbox import Outbox
 
 
 class PaymentService:
@@ -33,17 +35,15 @@ class PaymentService:
             logger.error(f"Error getting all payments: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
 
-    def _convert_to_payment_response(self, payment) -> PaymentResponse:
-        """Payment 모델을 PaymentResponse로 변환"""
+    def _convert_to_payment_response(self, payment: Payment) -> PaymentResponse:
+        """Convert Payment model to PaymentResponse schema"""
         return PaymentResponse(
             payment_id=payment.payment_id,
             order_id=payment.order_id,
             amount=payment.amount,
             currency=payment.currency,
-            payment_method=PaymentMethod(payment.payment_method if isinstance(payment.payment_method, str) else payment.payment_method.value),
-            payment_status=PaymentStatus(payment.payment_status if isinstance(payment.payment_status, str) else payment.payment_status.value),
-            external_payment_id=payment.external_payment_id,
-            payment_date=payment.payment_date,
+            payment_method=PaymentMethod(payment.payment_method.value),  # Convert to PaymentMethod enum
+            payment_status=PaymentStatus(payment.payment_status.value),  # Convert to PaymentStatus enum
             created_at=payment.created_at,
             updated_at=payment.updated_at
         )
@@ -52,20 +52,52 @@ class PaymentService:
         """새로운 결제 생성"""
         try:
             logger.info(f"Creating payment for order: {payment_data.order_id}")
-            payment = Payment(
-                order_id=payment_data.order_id,
-                amount=payment_data.amount,
-                currency=payment_data.currency,
-                payment_method=payment_data.payment_method,
-                payment_status=PaymentStatus.PENDING
-            )
             
-            self.db.add(payment)
-            await self.db.commit()
-            await self.db.refresh(payment)
+            # 테스트용: stock_reserved가 10인 경우 실패 시뮬레이션 (SAGA rollback pattern)
+            if payment_data.stock_reserved == 10:
+                logger.warning("Simulating payment failure for SAGA testing (stock_reserved = 10)")
+                raise Exception("Simulated payment failure for SAGA testing - stock_reserved = 10")
             
-            logger.info(f"Payment created successfully: {payment.payment_id}")
-            return PaymentResponse.from_orm(payment)
+            # 트랜잭션 시작
+            async with self.db.begin():
+                # 1. Payment 생성
+                payment = Payment(
+                    order_id=payment_data.order_id,
+                    amount=payment_data.amount,
+                    currency=payment_data.currency,
+                    payment_method=payment_data.payment_method,
+                    payment_status=PaymentStatus.PENDING
+                )
+                self.db.add(payment)
+                await self.db.flush()  # payment_id를 얻기 위해 flush
+                
+                # 2. Outbox 이벤트 생성
+                payment_created_event = {
+                    'type': "payment_success",
+                    'payment_id': payment.payment_id,
+                    'order_id': payment.order_id,
+                    'amount': payment.amount,
+                    'currency': payment.currency,
+                    'payment_method': payment.payment_method.value,  # Enum 값을 문자열로 변환
+                    'payment_status': payment.payment_status.value,  # Enum 값을 문자열로 변환
+                    'created_at': datetime.utcnow().isoformat()
+                }
+                
+                outbox_event = Outbox(
+                    id=str(uuid.uuid4()),
+                    aggregatetype="payment",
+                    aggregateid=str(payment.payment_id),
+                    type="payment_success",
+                    payload=payment_created_event
+                )
+                self.db.add(outbox_event)
+                
+            
+            # 트랜잭션 외부에서 조회 (트랜잭션이 완료된 후)
+            refreshed_payment = await self.db.get(Payment, payment.payment_id)
+
+            logger.info(f"Payment created successfully: {refreshed_payment.payment_id}")
+            return self._convert_to_payment_response(refreshed_payment)
             
         except Exception as e:
             logger.error(f"Error creating payment for order {payment_data.order_id}: {str(e)}")
@@ -79,20 +111,7 @@ class PaymentService:
             
             if payment:
                 logger.info(f"Payment found: {payment_id}")
-                # 수동으로 PaymentResponse 객체 생성하여 Enum 값 변환
-                return PaymentResponse(
-                    payment_id=payment.payment_id,
-                    order_id=payment.order_id,
-                    amount=payment.amount,
-                    currency=payment.currency,
-                    # 명시적으로 Enum 객체로 변환
-                    payment_method=PaymentMethod(payment.payment_method if isinstance(payment.payment_method, str) else payment.payment_method.value),
-                    payment_status=PaymentStatus(payment.payment_status if isinstance(payment.payment_status, str) else payment.payment_status.value),
-                    external_payment_id=payment.external_payment_id,
-                    payment_date=payment.payment_date,
-                    created_at=payment.created_at,
-                    updated_at=payment.updated_at
-                )
+                return self._convert_to_payment_response(payment)
                     
             logger.warning(f"Payment not found: {payment_id}")
             return None
@@ -126,19 +145,7 @@ class PaymentService:
             await self.db.refresh(payment)
             
             logger.info(f"Payment updated successfully: {payment_id}")
-            # 수동으로 PaymentResponse 객체 생성
-            return PaymentResponse(
-                payment_id=payment.payment_id,
-                order_id=payment.order_id,
-                amount=payment.amount,
-                currency=payment.currency,
-                payment_method=PaymentMethod(payment.payment_method if isinstance(payment.payment_method, str) else payment.payment_method.value),
-                payment_status=PaymentStatus(payment.payment_status if isinstance(payment.payment_status, str) else payment.payment_status.value),
-                external_payment_id=payment.external_payment_id,
-                payment_date=payment.payment_date,
-                created_at=payment.created_at,
-                updated_at=payment.updated_at
-            )
+            return self._convert_to_payment_response(payment)
             
         except Exception as e:
             logger.error(f"Error updating payment {payment_id}: {str(e)}")

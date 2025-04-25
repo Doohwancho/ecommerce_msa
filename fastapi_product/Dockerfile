@@ -7,7 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Install protoc
-RUN apt-get update && apt-get install -y protobuf-compiler
+# RUN apt-get update && apt-get install -y protobuf-compiler
 
 # Copy proto files
 COPY proto/ proto/
@@ -32,7 +32,7 @@ RUN python -m grpc_tools.protoc \
 COPY app/ app/
 
 # Clean up proto files after compilation
-RUN rm -f product.proto
+# RUN rm -f product.proto
 
 # Expose ports
 EXPOSE 8000

@@ -1,7 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from typing import List, Optional
-from app.models.category import Category, ProductCategory
+from app.models.product import Category, ProductCategory
 from app.config.logging import logger
 
 class CategoryManager:
