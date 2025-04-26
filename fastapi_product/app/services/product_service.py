@@ -2,6 +2,7 @@ from typing import List, Optional
 from bson import ObjectId
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from app.schemas.product import ProductCreate, ProductUpdate, ProductResponse, ProductsExistResponse, ProductInventoryResponse
 from app.config.database import get_product_collection, get_mysql_db
 from app.models.product import Product as MySQLProduct
@@ -43,8 +44,15 @@ class ProductService:
             collection = await self._get_collection()
             await collection.insert_one(product_dict)
             
-            # MySQL에 저장
+            # MySQL에 저장 (FOR UPDATE로 잠금)
             db = await self._get_db()
+            stmt = select(MySQLProduct).where(MySQLProduct.product_id == product_id).with_for_update()
+            result = await db.execute(stmt)
+            existing_product = result.scalar_one_or_none()
+            
+            if existing_product:
+                raise Exception(f"Product {product_id} already exists in MySQL")
+            
             mysql_product = MySQLProduct(
                 product_id=product_id,
                 title=product.title,
@@ -153,8 +161,11 @@ class ProductService:
         try:
             db = await self._get_db()
             
-            # MySQL에서 제품 조회
-            mysql_product = await db.get(MySQLProduct, product_id)
+            # MySQL에서 제품 조회 (FOR UPDATE로 잠금)
+            stmt = select(MySQLProduct).where(MySQLProduct.product_id == product_id).with_for_update()
+            result = await db.execute(stmt)
+            mysql_product = result.scalar_one_or_none()
+            
             if not mysql_product:
                 return False, f"Product {product_id} not found"
             
@@ -293,8 +304,11 @@ class ProductService:
         try:
             db = await self._get_db()
             
-            # MySQL에서 제품 조회
-            mysql_product = await db.get(MySQLProduct, product_id)
+            # MySQL에서 제품 조회 (FOR UPDATE로 잠금)
+            stmt = select(MySQLProduct).where(MySQLProduct.product_id == product_id).with_for_update()
+            result = await db.execute(stmt)
+            mysql_product = result.scalar_one_or_none()
+            
             if not mysql_product:
                 logger.warning(f"Product {product_id} not found in MySQL")
                 return False
@@ -331,8 +345,11 @@ class ProductService:
         try:
             db = await self._get_db()
             
-            # MySQL에서 제품 조회
-            mysql_product = await db.get(MySQLProduct, product_id)
+            # MySQL에서 제품 조회 (FOR UPDATE로 잠금)
+            stmt = select(MySQLProduct).where(MySQLProduct.product_id == product_id).with_for_update()
+            result = await db.execute(stmt)
+            mysql_product = result.scalar_one_or_none()
+            
             if not mysql_product:
                 logger.warning(f"Product {product_id} not found in MySQL")
                 return False
@@ -355,8 +372,8 @@ class ProductService:
 
     async def confirm_inventory(self, product_id: str, quantity: int) -> bool:
         """
-        주문 확정 시 예약된 재고를 실제 재고에서 차감합니다.
-        MySQL에서만 재고를 관리합니다.
+        주문 확정, 성공 시 재고를 차감합니다.
+        stock과 stock_reserved 모두에서 quantity를 차감합니다.
         
         Args:
             product_id: 제품 ID
@@ -368,8 +385,11 @@ class ProductService:
         try:
             db = await self._get_db()
             
-            # MySQL에서 제품 조회
-            mysql_product = await db.get(MySQLProduct, product_id)
+            # MySQL에서 제품 조회 (FOR UPDATE로 잠금)
+            stmt = select(MySQLProduct).where(MySQLProduct.product_id == product_id).with_for_update()
+            result = await db.execute(stmt)
+            mysql_product = result.scalar_one_or_none()
+            
             if not mysql_product:
                 logger.warning(f"Product {product_id} not found in MySQL")
                 return False
@@ -409,40 +429,3 @@ class ProductService:
         except Exception as e:
             logger.error(f"Error getting product inventory {product_id}: {str(e)}")
             raise e
-
-    async def update_stock_after_order(self, db: AsyncSession, product_id: str, quantity: int) -> bool:
-        """
-        주문 성공 시 재고를 차감합니다.
-        stock과 stock_reserved 모두에서 quantity를 차감합니다.
-        
-        Args:
-            db: 데이터베이스 세션
-            product_id: 제품 ID
-            quantity: 차감할 수량
-            
-        Returns:
-            bool: 성공 여부
-        """
-        try:
-            # MySQL에서 제품 조회
-            mysql_product = await db.get(MySQLProduct, product_id)
-            if not mysql_product:
-                logger.warning(f"Product {product_id} not found in MySQL")
-                return False
-            
-            # 예약된 재고와 실제 재고 확인
-            if mysql_product.stock_reserved < quantity or mysql_product.stock < quantity:
-                logger.warning(f"Cannot update stock: product {product_id}, requested {quantity}, reserved {mysql_product.stock_reserved}, total {mysql_product.stock}")
-                return False
-            
-            # 재고 차감 (stock과 stock_reserved 모두 감소)
-            mysql_product.stock -= quantity
-            mysql_product.stock_reserved -= quantity
-            await db.commit()
-            
-            logger.info(f"Successfully updated stock for product {product_id}: stock={mysql_product.stock}, stock_reserved={mysql_product.stock_reserved}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error updating stock for product {product_id}: {str(e)}")
-            return False
