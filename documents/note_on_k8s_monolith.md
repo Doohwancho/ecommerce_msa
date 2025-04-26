@@ -503,7 +503,7 @@ curl -s "http://localhost:80/categories/1/products?include_subcategories=true"
 kubectl get pod
 
 # MySQL 파드에 접속
-kubectl exec -it mysql-deployment-6f9b96459c-rzp2h -- bash
+kubectl exec -it mysql-deployment-6f9b96459c-sctjj -- bash
 
 # MySQL에 접속 (컨테이너 내부에서)
 mysql --default-character-set=utf8mb4 -u root -p

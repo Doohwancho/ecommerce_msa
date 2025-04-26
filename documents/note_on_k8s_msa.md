@@ -80,7 +80,7 @@ kubectl port-forward service/product-service 8002:8000
 curl -X POST http://localhost:8002/api/products/ \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "Apple 2025 MacBook Pro",
+    "title": "Apple 2027 MacBook Pro",
     "description": "최신 Apple MacBook Pro, M3 Max 칩, 16인치 Liquid Retina XDR 디스플레이",
     "brand": "Apple",
     "model": "MUW73LL/A",
@@ -179,17 +179,33 @@ kubectl port-forward service/order-service 8003:8000
 
 http://localhost:8003/docs#/
 
+# case1) create order -> create payment 
 curl -X POST http://localhost:8003/api/orders/ \
   -H "Content-Type: application/json" \
   -d '{
-    "user_id": "67fce9faab19bca9073204c4",
+    "user_id": "680c715b589aa51f4407094e",
     "items": [
       {
-        "product_id": "P67fcf4a101735a7e57653df1",
-        "quantity": 2
+        "product_id": "P680c7168ddb3337802d8cea5",
+        "quantity": 1
       }
     ]
   }'
+ 
+
+# case2) create order -> create payment(fail!) -> rollback payment -> rollback order -> rollback product stock reserved
+curl -X POST http://localhost:8003/api/orders/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "6809e8f9bdb0cf8790a01384",
+    "items": [
+      {
+        "product_id": "P6809e908df4af07e566a3e88",
+        "quantity": 10
+      }
+    ]
+  }'
+
 
 # 테스트
 curl -X GET http://localhost:8003/api/orders/1
@@ -233,7 +249,27 @@ curl -X GET http://localhost:8002/api/categories/1/
 curl -X GET http://localhost:8002/api/categories/1/subcategories
 ```
 
-## f. 각 모듈의 컨테이너에서 다른 모듈의 컨테이너와 통신하기
+## f. payment 모듈 테스트 
+1. create_order() 하면,
+2. category_product mysql database에 outbox 테이블에 write 되고,
+3. 그걸 debezium이 outbox table 변화를 감지해서 kafka에 'order' 토픽에 'order_created' 이벤트로 메시지를 보내면,
+4. payment module에서 해당 토픽을 subscribe해서 가져와서
+5. create_payment()를 처리하고,
+6. category_product mysql database에 payments 테이블을 업데이트 한다.
+
+```bash
+# 포트 열기
+kubectl port-forward service/payment-service 8004:8000
+
+# health check
+curl -X GET http://localhost:8004/health
+
+# 특정 결제의 모든 트랜잭션 조회
+curl -X GET http://localhost:8004/api/payments/
+```
+
+
+## g. 각 모듈의 컨테이너에서 다른 모듈의 컨테이너와 통신하기
 ```bash
 # product pod 이름 가져오기
 POD_NAME=$(kubectl get pod -l app=product-service -o jsonpath="{.items[0].metadata.name}")
@@ -252,7 +288,8 @@ curl http://user-service:8000/
 curl http://order-service:8000/
 ```
 
-## g. api-gateway
+
+## h. api-gateway
 ```bash
 minikube tunnel
 
