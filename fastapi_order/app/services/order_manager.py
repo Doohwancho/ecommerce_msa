@@ -367,8 +367,8 @@ class OrderManager:
                             'price': item.price_at_order
                         })
 
-                    order_cancelled_event = {
-                        'type': "order_cancelled",
+                    order_failed_event = {
+                        'type': "order_failed",
                         'order_id': str(order.order_id),
                         'user_id': order.user_id,
                         'status': OrderStatus.CANCELLED.value,
@@ -381,8 +381,8 @@ class OrderManager:
                         id=str(uuid.uuid4()),
                         aggregatetype="order",
                         aggregateid=str(order.order_id),
-                        type="order_cancelled",
-                        payload=order_cancelled_event
+                        type="order_failed",
+                        payload=order_failed_event
                     )
                     self.db.add(outbox_event)
 
