@@ -15,24 +15,35 @@ spec:
         app: kibana
     spec:
       containers:
-      - name: kibana
-        image: docker.elastic.co/kibana/kibana:7.15.2
-        ports:
-        - containerPort: 5601
-          name: http
-        env:
-        - name: ELASTICSEARCH_HOSTS
-          value: http://elasticsearch-service:9200
-        resources:
-          limits:
-            cpu: 500m
-            memory: 1.5Gi
-          requests:
-            cpu: 100m
-            memory: 1Gi
+        - name: kibana
+          image: docker.elastic.co/kibana/kibana:8.11.1
+          ports:
+            - containerPort: 5601
+              name: http
+          env:
+            - name: ELASTICSEARCH_HOSTS
+              value: "http://elasticsearch-service:9200"
+            - name: NODE_OPTIONS
+              value: "--no-warnings"
+            - name: XPACK_SECURITY_ENCRYPTIONKEY
+              value: "something_at_least_32_characters_long"
+            - name: XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY
+              value: "something_at_least_32_characters_long"
+            - name: XPACK_REPORTING_ENCRYPTIONKEY
+              value: "something_at_least_32_characters_long"
+            - name: XPACK_REPORTING_KIBANASERVER_HOSTNAME
+              value: "localhost"
+            - name: XPACK_SECURITY_SECURE_COOKIES
+              value: "true"
+          resources:
+            limits:
+              cpu: 500m
+              memory: 1Gi
+            requests:
+              cpu: 100m
+              memory: 500Mi
 
 ---
-
 apiVersion: v1
 kind: Service
 metadata:
@@ -45,4 +56,3 @@ spec:
     - protocol: TCP
       port: 5601
       targetPort: 5601
-
