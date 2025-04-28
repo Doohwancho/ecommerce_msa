@@ -176,5 +176,6 @@ pyrightconfig.json
 # End of https://www.toptal.com/developers/gitignore/api/python
 
 
-### fake data는 용량이 크니까, 로컬 pc에서 직접 만든다 ### 
+### fake data는 용량이 크니까, 로컬 pc에서 직접 만든다 ###
 products.json
+products-*.json

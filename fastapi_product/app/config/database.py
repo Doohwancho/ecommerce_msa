@@ -22,9 +22,15 @@ async def get_product_collection() -> AgnosticCollection:
         mongo_client = AsyncIOMotorClient(
             f"mongodb://{os.getenv('MONGODB_USERNAME')}:{os.getenv('MONGODB_PASSWORD')}@{os.getenv('MONGODB_URL')}"
         )
+        # 명시적으로 데이터베이스와 컬렉션 생성
         mongo_db = mongo_client.my_db
+        # 컬렉션이 존재하는지 확인하고 없으면 생성
+        if "products" not in await mongo_db.list_collection_names():
+            await mongo_db.create_collection("products")
+            print("Created products collection")
+        
         product_collection = mongo_db.products
-        print("MongoDB connection successful")
+        print("MongoDB connection successful and collection verified")
         return product_collection
     except Exception as e:
         print(f"MongoDB connection error: {e}")

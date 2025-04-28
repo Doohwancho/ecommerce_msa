@@ -5,7 +5,7 @@ fastapi + mongodb + ELK on k8s
 1. k8s에서 간단한 webapp + ELK for logging run
 2. terminal에서 send http GET create user, get user request
 3. mongo-express에서 데이터 잘 들어왔는지 확인 
-4. logstash, elastic cache에 log가 쌓였는지 확인 
+4. logstash, elastic search에 log가 쌓였는지 확인 
 5. kibana dashboard에서 로그 visualize
 
 [resource](https://github.com/deshwalmahesh/fastapi-kubernetes/tree/main)
@@ -395,7 +395,7 @@ green  open   .kibana_task_manager_7.15.2_001 mDr98G5pQtyXH8jibApHWQ   1   0    
 # fastapi-logs 인덱스 확인
 curl http://localhost:9200/fastapi-logs-*/_search?pretty
 ```
-이러면 elastic cache에 로그 찍힌걸 볼 수 있다.
+이러면 elastic search에 로그 찍힌걸 볼 수 있다.
 
 
 

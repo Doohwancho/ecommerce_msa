@@ -80,7 +80,7 @@ kubectl port-forward service/product-service 8002:8000
 curl -X POST http://localhost:8002/api/products/ \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "Apple 2027 MacBook Pro",
+    "title": "Apple 2025 MacBook Pro",
     "description": "최신 Apple MacBook Pro, M3 Max 칩, 16인치 Liquid Retina XDR 디스플레이",
     "brand": "Apple",
     "model": "MUW73LL/A",
@@ -94,7 +94,7 @@ curl -X POST http://localhost:8002/api/products/ \
       "amount": 3499.99,
       "currency": "USD"
     },
-    "stock": 85, 
+    "stock": 100, 
     "weight": {
       "value": 4.8,
       "unit": "POUND"
@@ -186,7 +186,7 @@ curl -X POST http://localhost:8003/api/orders/ \
     "user_id": "680c715b589aa51f4407094e",
     "items": [
       {
-        "product_id": "P680c7168ddb3337802d8cea5",
+        "product_id": "P680cd9d4d0e0cd8bc0dae8bf",
         "quantity": 1
       }
     ]
@@ -300,3 +300,165 @@ curl -v -H "Host: my-deployed-app.com" http://localhost:80/api/products
 curl -v -H "Host: my-deployed-app.com" http://localhost:80/api/users
 curl -v -H "Host: my-deployed-app.com" http://localhost:80/api/orders
 ```
+
+
+## i. mongodb
+
+### step1) 컨테이너 띄우기 
+```bash
+./test_elastic_search.sh
+
+minikube tunnel
+kubectl port-forward service/product-service 8002:8000 
+minikube service kibana-service 
+
+kubectl exec -it mongodb-stateful-0 -- mongoimport --db my_db --collection products --file /tmp/products.json --jsonArray --username username --password password --authenticationDatabase admin 
+
+show dbs
+use my_db
+show collections
+use products;
+
+db.products.countDocuments()
+db.products.find()
+```
+
+
+### step2) fake data generate & import to mongodb 
+
+먼저 fake data를 만든다.
+```bash 
+npm install @faker-js/faker
+cd faker.js
+node generate-products.js
+# products-N 에서 N은 product의 갯수
+mv products.json products-1000000.json 
+```
+
+다음, container 내부에 mongodb에 import한다.
+
+먼저 파일을 컨테이너 내부로 복사한 후,
+```bash 
+kubectl cp faker.js/products-10.json mongodb-stateful-0:/tmp/products.json
+```
+
+mongoimport로 대용량 .json 파일을 mongodb로 import 
+```bash
+kubectl exec -it mongodb-stateful-0 -- mongoimport --db my_db --collection products --file /tmp/products.json --jsonArray --username username --password password --authenticationDatabase admin
+```
+
+그리고 만에하나 상황을 위해서 curl로 하나 상품 만든다.
+```bash
+minikube tunnel 
+
+kubectl port-forward service/product-service 8002:8000 
+
+curl -X POST http://localhost:8002/api/products/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Apple 2025 MacBook Pro",
+    "description": "최신 Apple MacBook Pro, M3 Max 칩, 16인치 Liquid Retina XDR 디스플레이",
+    "brand": "Apple",
+    "model": "MUW73LL/A",
+    "sku": "MBP-16-M3-MAX",
+    "upc": "195949185694",
+    "color": "Space Gray",
+    "category_ids": [1, 2, 4],
+    "primary_category_id": 4,
+    "category_breadcrumbs": ["전자제품", "컴퓨터", "노트북"],
+    "price": {
+      "amount": 3499.99,
+      "currency": "USD"
+    },
+    "stock": 100, 
+    "weight": {
+      "value": 4.8,
+      "unit": "POUND"
+    },
+    "dimensions": {
+      "length": 14.01,
+      "width": 9.77,
+      "height": 0.66,
+      "unit": "INCH"
+    },
+    "attributes": {
+      "processor": "M3 Max",
+      "ram": "32GB",
+      "storage": "1TB SSD",
+      "screen_size": "16 inch",
+      "resolution": "3456 x 2234"
+    },
+    "variants": [
+      {
+        "id": "variant1",
+        "sku": "MBP-16-M3-MAX-SG-32GB-1TB",
+        "color": "Space Gray",
+        "storage": "1TB",
+        "price": {
+          "amount": 3499.99,
+          "currency": "USD"
+        },
+        "attributes": {
+          "processor": "M3 Max",
+          "ram": "32GB"
+        },
+        "inventory": 50
+      },
+      {
+        "id": "variant2",
+        "sku": "MBP-16-M3-MAX-SIL-32GB-1TB",
+        "color": "Silver",
+        "storage": "1TB",
+        "price": {
+          "amount": 3499.99,
+          "currency": "USD"
+        },
+        "attributes": {
+          "processor": "M3 Max",
+          "ram": "32GB"
+        },
+        "inventory": 35
+      }
+    ],
+    "images": [
+      {
+        "url": "https://example.com/macbook-pro-1.jpg",
+        "main": true
+      },
+      {
+        "url": "https://example.com/macbook-pro-2.jpg",
+        "main": false
+      }
+    ]
+  }'
+```
+
+### step3) monstache 로그 확인
+
+```bash
+kubectl delete -f k8_configs/monstache_depl_serv.yaml
+
+kubectl apply -f k8_configs/monstache_depl_serv.yaml
+
+kubectl logs -f $(kubectl get pods -l app=monstache -o jsonpath="{.items[0].metadata.name}")
+```
+
+
+### step4) kibana 확인
+mongodb -> monstache -> elastic search로 상품정보가 들어왔는지 확인 
+
+1.
+```bash
+minikube service kibana-service 
+
+http://127.0.0.1:62668/app/discover#/ 
+
+click discover tap 
+
+create data view에서
+1. name: products
+2. index pattern: my_db.products*
+3. timestamp field: 적용 안한다 선택 (왜냐면 faker.js에서 가데이터 생성시 created_at 필드 없어서 인식을 못함)
+click save data to kibana 
+```
+
