@@ -92,6 +92,28 @@ class ProductService:
                 )
                 if es_response and es_response.get('found', False):
                     product_data = es_response['_source']
+                    # product_id 필드를 명시적으로 추가
+                    product_data['product_id'] = product_id
+                    
+                    # variants 데이터 처리
+                    if 'variants' in product_data:
+                        variants = []
+                        for variant in product_data['variants']:
+                            variant_data = {
+                                "attributes": variant.get("attributes", {}),
+                                "color": variant.get("color"),
+                                "id": variant.get("id"),
+                                "inventory": variant.get("inventory", 0),
+                                "price": {
+                                    "amount": variant.get("price", {}).get("amount", 0.0),
+                                    "currency": variant.get("price", {}).get("currency", "USD")
+                                },
+                                "sku": variant.get("sku"),
+                                "storage": variant.get("storage")
+                            }
+                            variants.append(variant_data)
+                        product_data['variants'] = variants
+                    
                     logger.info(f"Product found in Elasticsearch: {product_id}")
                     return ProductResponse(**product_data)
             except Exception as es_error:
