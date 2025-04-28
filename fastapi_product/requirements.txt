@@ -12,3 +12,5 @@ protobuf==4.22.1
 python-dotenv==1.0.0
 aiokafka==0.10.0
 kafka-python==2.0.2
+elasticsearch==8.11.1
+aiohttp==3.9.1

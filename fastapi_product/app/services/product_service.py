@@ -3,6 +3,7 @@ from bson import ObjectId
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from app.config.elasticsearch import elasticsearch_config
 from app.schemas.product import ProductCreate, ProductUpdate, ProductResponse, ProductsExistResponse, ProductInventoryResponse
 from app.config.database import get_product_collection, get_mysql_db
 from app.models.product import Product as MySQLProduct
@@ -26,6 +27,9 @@ class ProductService:
             if self.db is None:
                 raise Exception("MySQL connection failed")
         return self.db
+    
+    async def _get_es(self):
+        return await elasticsearch_config.get_client()
     
     async def create_product(self, product: ProductCreate) -> ProductResponse:
         """새로운 제품 생성 (MongoDB와 MySQL에 동시 저장)"""
@@ -77,8 +81,23 @@ class ProductService:
             raise e
     
     async def get_product(self, product_id: str) -> Optional[ProductResponse]:
-        """제품 ID로 제품 조회"""
+        """제품 ID로 제품 조회 (Elasticsearch 먼저 시도, 없으면 MongoDB 조회)"""
         try:
+            # 1. Elasticsearch에서 먼저 조회
+            es = await self._get_es()
+            try:
+                es_response = await es.get(
+                    index="my_db.products",
+                    id=product_id
+                )
+                if es_response and es_response.get('found', False):
+                    product_data = es_response['_source']
+                    logger.info(f"Product found in Elasticsearch: {product_id}")
+                    return ProductResponse(**product_data)
+            except Exception as es_error:
+                logger.warning(f"Product not found in Elasticsearch: {product_id}, error: {str(es_error)}")
+            
+            # 2. Elasticsearch에 없는 경우 MongoDB에서 조회
             collection = await self._get_collection()
             product = await collection.find_one({"product_id": product_id})
             if product:
@@ -111,9 +130,10 @@ class ProductService:
                     "created_at": product.get("created_at")
                 }
                 
-                logger.info(f"Product found: {product_id}")
+                logger.info(f"Product found in MongoDB: {product_id}")
                 return ProductResponse(**response_data)
-            logger.warning(f"Product not found: {product_id}")
+            
+            logger.warning(f"Product not found in both Elasticsearch and MongoDB: {product_id}")
             return None
         except Exception as e:
             logger.error(f"Error getting product {product_id}: {str(e)}")
@@ -230,43 +250,127 @@ class ProductService:
             raise e
     
     async def get_products(self, skip: int = 0, limit: int = 100) -> List[ProductResponse]:
-        """모든 제품 조회"""
+        """모든 제품 조회 (Elasticsearch 사용)"""
         try:
-            collection = await self._get_collection()
+            es = await self._get_es()
+            query = {
+                "query": {
+                    "match_all": {}
+                },
+                "from": skip,
+                "size": limit
+            }
+            
+            response = await es.search(
+                index="my_db.products",
+                body=query
+            )
+            
             products = []
-            async for product in collection.find().skip(skip).limit(limit):
-                if "_id" in product:
-                    product["_id"] = str(product["_id"])
+            for hit in response['hits']['hits']:
+                product_data = hit['_source']
                 
-                # MongoDB에서 가져온 데이터를 ProductResponse 형식에 맞게 변환
+                # variants 데이터 처리
+                variants = []
+                for variant in product_data.get("variants", []):
+                    variant_data = {
+                        "attributes": variant.get("attributes", {}),
+                        "color": variant.get("color"),
+                        "id": variant.get("id"),
+                        "inventory": variant.get("inventory", 0),
+                        "price": {
+                            "amount": variant.get("price", {}).get("amount", 0.0),
+                            "currency": variant.get("price", {}).get("currency", "USD")
+                        },
+                        "sku": variant.get("sku"),
+                        "storage": variant.get("storage")  # storage 필드가 없으면 None으로 설정
+                    }
+                    variants.append(variant_data)
+                
+                # Elasticsearch에서 가져온 데이터를 ProductResponse 형식에 맞게 변환
                 response_data = {
-                    "product_id": product.get("product_id", ""),
-                    "title": product.get("title", ""),
-                    "description": product.get("description", ""),
-                    "brand": product.get("brand"),
-                    "model": product.get("model"),
-                    "sku": product.get("sku"),
-                    "upc": product.get("upc"),
-                    "color": product.get("color"),
-                    "category_ids": product.get("category_ids", []),
-                    "primary_category_id": product.get("primary_category_id"),
-                    "category_breadcrumbs": product.get("category_breadcrumbs"),
+                    "product_id": product_data.get("product_id", str(hit['_id'])),
+                    "title": product_data.get("title", ""),
+                    "description": product_data.get("description", ""),
+                    "brand": product_data.get("brand"),
+                    "model": product_data.get("model"),
+                    "sku": product_data.get("sku"),
+                    "upc": product_data.get("upc"),
+                    "color": product_data.get("color"),
+                    "category_ids": product_data.get("category_ids", []),
+                    "primary_category_id": product_data.get("primary_category_id"),
+                    "category_breadcrumbs": product_data.get("category_breadcrumbs"),
                     "price": {
-                        "amount": product.get("price", {}).get("amount", 0.0),
-                        "currency": product.get("price", {}).get("currency", "USD")
+                        "amount": product_data.get("price", {}).get("amount", 0.0),
+                        "currency": product_data.get("price", {}).get("currency", "USD")
                     },
-                    "weight": product.get("weight"),
-                    "dimensions": product.get("dimensions"),
-                    "attributes": product.get("attributes"),
-                    "variants": product.get("variants"),
-                    "images": product.get("images"),
-                    "created_at": product.get("created_at")
+                    "weight": product_data.get("weight"),
+                    "dimensions": product_data.get("dimensions"),
+                    "attributes": product_data.get("attributes"),
+                    "variants": variants,
+                    "images": product_data.get("images"),
+                    "created_at": product_data.get("created_at")
                 }
+                
                 products.append(ProductResponse(**response_data))
+            
             return products
         except Exception as e:
-            logger.error(f"Error getting products: {str(e)}")
-            raise e
+            logger.error(f"Error getting products from Elasticsearch: {str(e)}")
+            # Elasticsearch 실패 시 MongoDB로 폴백
+            try:
+                collection = await self._get_collection()
+                products = []
+                async for product in collection.find().skip(skip).limit(limit):
+                    if "_id" in product:
+                        product["_id"] = str(product["_id"])
+                    
+                    # variants 데이터 처리
+                    variants = []
+                    for variant in product.get("variants", []):
+                        variant_data = {
+                            "attributes": variant.get("attributes", {}),
+                            "color": variant.get("color"),
+                            "id": variant.get("id"),
+                            "inventory": variant.get("inventory", 0),
+                            "price": {
+                                "amount": variant.get("price", {}).get("amount", 0.0),
+                                "currency": variant.get("price", {}).get("currency", "USD")
+                            },
+                            "sku": variant.get("sku"),
+                            "storage": variant.get("storage")  # storage 필드가 없으면 None으로 설정
+                        }
+                        variants.append(variant_data)
+                    
+                    response_data = {
+                        "product_id": product.get("product_id", str(product["_id"])),
+                        "title": product.get("title", ""),
+                        "description": product.get("description", ""),
+                        "brand": product.get("brand"),
+                        "model": product.get("model"),
+                        "sku": product.get("sku"),
+                        "upc": product.get("upc"),
+                        "color": product.get("color"),
+                        "category_ids": product.get("category_ids", []),
+                        "primary_category_id": product.get("primary_category_id"),
+                        "category_breadcrumbs": product.get("category_breadcrumbs"),
+                        "price": {
+                            "amount": product.get("price", {}).get("amount", 0.0),
+                            "currency": product.get("price", {}).get("currency", "USD")
+                        },
+                        "weight": product.get("weight"),
+                        "dimensions": product.get("dimensions"),
+                        "attributes": product.get("attributes"),
+                        "variants": variants,
+                        "images": product.get("images"),
+                        "created_at": product.get("created_at")
+                    }
+                    
+                    products.append(ProductResponse(**response_data))
+                return products
+            except Exception as mongo_error:
+                logger.error(f"Error getting products from MongoDB: {str(mongo_error)}")
+                raise e
     
     async def check_products_exist(self, product_ids: List[str]) -> ProductsExistResponse:
         """여러 제품의 존재 여부 확인"""

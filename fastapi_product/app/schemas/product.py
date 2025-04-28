@@ -24,7 +24,7 @@ class Variant(BaseModel):
     id: str
     sku: str
     color: str
-    storage: str
+    storage: Optional[str] = None
     price: Price
     attributes: Dict[str, str]
     inventory: int

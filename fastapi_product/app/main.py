@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.api import api_router
 from app.config.database import Base, engine
 from app.services.product_manager import ProductManager
+from app.config.elasticsearch import elasticsearch_config
 from contextlib import asynccontextmanager
 from app.config.logging import logger
 from sqlalchemy import text
@@ -46,6 +47,14 @@ async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await safe_create_tables_if_not_exist(conn)
     
+    # Elasticsearch 초기화
+    try:
+        await elasticsearch_config.get_client()
+        logger.info("Elasticsearch initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize Elasticsearch: {e}")
+        raise
+    
     # Start gRPC server in background
     grpc_task = asyncio.create_task(grpc_serve())
     logger.info("gRPC server started on port 50051")
@@ -61,6 +70,10 @@ async def lifespan(app: FastAPI):
     # 종료 시 Kafka consumer 정리
     await product_manager.stop()
     logger.info("Kafka consumer stopped")
+
+    # Elasticsearch 연결 종료
+    await elasticsearch_config.close()
+    logger.info("Elasticsearch connection closed")
 
     # Cancel gRPC task
     if grpc_task:
