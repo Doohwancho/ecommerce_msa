@@ -114,7 +114,7 @@ class ProductService:
                             variants.append(variant_data)
                         product_data['variants'] = variants
                     
-                    logger.info(f"Product found in Elasticsearch: {product_id}")
+                    # logger.info(f"Product found in Elasticsearch: {product_id}")
                     return ProductResponse(**product_data)
             except Exception as es_error:
                 logger.warning(f"Product not found in Elasticsearch: {product_id}, error: {str(es_error)}")
@@ -554,4 +554,53 @@ class ProductService:
             )
         except Exception as e:
             logger.error(f"Error getting product inventory {product_id}: {str(e)}")
+            raise e
+
+    async def get_product_mongodb_only(self, product_id: str) -> Optional[ProductResponse]:
+        """MongoDB에서만 제품 ID로 제품 조회 (benchmark test용)"""
+        try:
+            collection = await self._get_collection()
+            try:
+                product = await collection.find_one({"_id": ObjectId(product_id)})
+            except:
+                # ObjectId 변환 실패 시 product_id로 검색 시도
+                product = await collection.find_one({"product_id": product_id})
+            
+            if product:
+                # ObjectId를 문자열로 변환
+                if "_id" in product:
+                    product["_id"] = str(product["_id"])
+                
+                # MongoDB에서 가져온 데이터를 ProductResponse 형식에 맞게 변환
+                response_data = {
+                    "product_id": str(product["_id"]),  # _id를 product_id로 사용
+                    "title": product.get("title", ""),
+                    "description": product.get("description", ""),
+                    "brand": product.get("brand"),
+                    "model": product.get("model"),
+                    "sku": product.get("sku"),
+                    "upc": product.get("upc"),
+                    "color": product.get("color"),
+                    "category_ids": product.get("category_ids", []),
+                    "primary_category_id": product.get("primary_category_id"),
+                    "category_breadcrumbs": product.get("category_breadcrumbs"),
+                    "price": {
+                        "amount": product.get("price", {}).get("amount", 0.0),
+                        "currency": product.get("price", {}).get("currency", "USD")
+                    },
+                    "weight": product.get("weight"),
+                    "dimensions": product.get("dimensions"),
+                    "attributes": product.get("attributes"),
+                    "variants": product.get("variants"),
+                    "images": product.get("images"),
+                    "created_at": product.get("created_at")
+                }
+                
+                # logger.info(f"Product found in MongoDB: {product_id}")
+                return ProductResponse(**response_data)
+            
+            logger.warning(f"Product not found in MongoDB: {product_id}")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting product from MongoDB {product_id}: {str(e)}")
             raise e

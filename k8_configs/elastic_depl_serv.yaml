@@ -21,11 +21,11 @@ spec:
             - name: xpack.security.enabled
               value: "false"
             - name: ELASTIC_USERNAME
-              value: "elastic"  # 기본 사용자 이름
+              value: "elastic" # 기본 사용자 이름
             - name: ELASTIC_PASSWORD
-              value: "changeme"  # 기본 비밀번호
+              value: "changeme" # 기본 비밀번호
             - name: ES_JAVA_OPTS
-              value: "-Xms512m -Xmx512m"
+              value: "-Xms4g -Xmx4g" # 힙 메모리 4GB로 증가
           ports:
             - containerPort: 9200
               name: http
@@ -33,11 +33,29 @@ spec:
               name: transport
           resources:
             limits:
-              cpu: 500m
-              memory: 1Gi
+              cpu: 4000m
+              memory: 8Gi # 컨테이너 메모리 제한 8GB로 증가
             requests:
-              cpu: 100m
-              memory: 500Mi
+              cpu: 1000m
+              memory: 4Gi # 컨테이너 메모리 요청 4GB로 증가
+          volumeMounts:
+            - name: elasticsearch-data
+              mountPath: /usr/share/elasticsearch/data
+      volumes:
+        - name: elasticsearch-data
+          persistentVolumeClaim:
+            claimName: elasticsearch-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: elasticsearch-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
 ---
 apiVersion: v1
 kind: Service

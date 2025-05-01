@@ -179,3 +179,5 @@ pyrightconfig.json
 ### fake data는 용량이 크니까, 로컬 pc에서 직접 만든다 ###
 products.json
 products-*.json
+elasticsearch_product_ids.json
+product_ids.json

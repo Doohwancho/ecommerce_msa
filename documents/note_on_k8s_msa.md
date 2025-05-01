@@ -88,6 +88,8 @@ curl -X POST http://localhost:8002/api/products/ \
     "upc": "195949185694",
     "color": "Space Gray",
     "category_ids": [1, 2, 4],
+    "category_path", "1/2/4",
+    "category_level" 3,
     "primary_category_id": 4,
     "category_breadcrumbs": ["전자제품", "컴퓨터", "노트북"],
     "price": {
@@ -302,16 +304,36 @@ curl -v -H "Host: my-deployed-app.com" http://localhost:80/api/orders
 ```
 
 
-## i. mongodb
+## i. mongodb stress test 
 
-### step1) 컨테이너 띄우기 
+### step1) 디스크 용량 확보 
+```bash 
+# 1. 먼저 컨테이너 삭제 
+minikube delete 
+
+# 2. 도커 삭제 
+docker system prune -a --volumes
+
+# 3. k8s persistence 삭제 
+kubectl get pv
+kubectl get pvc
+kubectl delete pv --all 
+kubectl delete pvc --all 
+```
+
+
+
+### step2) 컨테이너 띄우기 
 ```bash
 ./test_elastic_search.sh
 
 minikube tunnel
 kubectl port-forward service/product-service 8002:8000 
-minikube service kibana-service 
+curl -X GET http://localhost:8002/api/products/
+```
 
+### step3) mongodb 접속 
+```bash
 kubectl exec -it mongodb-stateful-0 -- mongoimport --db my_db --collection products --file /tmp/products.json --jsonArray --username username --password password --authenticationDatabase admin 
 
 show dbs
@@ -323,23 +345,34 @@ db.products.countDocuments()
 db.products.find()
 ```
 
+### step4) debezium 끄기 
+bulk insert를 할껀데, 용량이 크다보니까, 대용량 .json파일을 mongodb & elastic search에 다이렉트로 import 할 계획임.
 
-### step2) fake data generate & import to mongodb 
+monstache가 켜져있으면, mongodb에 bulk insert를 하면, 얘가 elastic search로 옮기는 과정에서 OOM이 뜸.
+
+```bash 
+kubectl delete -f k8_config/monstache_depl_serv.yaml
+```
+
+### step5) fake data generate 
 
 먼저 fake data를 만든다.
 ```bash 
 npm install @faker-js/faker
 cd faker.js
 node generate-products.js
-# products-N 에서 N은 product의 갯수
-mv products.json products-1000000.json 
+mv products.json faker.js/products.json
 ```
 
-다음, container 내부에 mongodb에 import한다.
+### step6) 100만개 상품 데이터를 mongodb container 내부로 복사 후 import 
 
 먼저 파일을 컨테이너 내부로 복사한 후,
 ```bash 
-kubectl cp faker.js/products-10.json mongodb-stateful-0:/tmp/products.json
+kubectl cp faker.js/products.json mongodb-stateful-0:/tmp/products.json
+
+kubectl exec -it mongodb-stateful-0 -- ls -la /tmp/ 
+
+kubectl exec -it mongodb-stateful-0 -- cat /tmp/products.json | head -20
 ```
 
 mongoimport로 대용량 .json 파일을 mongodb로 import 
@@ -347,118 +380,117 @@ mongoimport로 대용량 .json 파일을 mongodb로 import
 kubectl exec -it mongodb-stateful-0 -- mongoimport --db my_db --collection products --file /tmp/products.json --jsonArray --username username --password password --authenticationDatabase admin
 ```
 
-그리고 만에하나 상황을 위해서 curl로 하나 상품 만든다.
+### step7) mongodb에 데이터 잘 들어갔는지 확인 
 ```bash
-minikube tunnel 
+kubectl exec -it mongodb-stateful-0 -- mongosh -u username -p password --authenticationDatabase admin
 
-kubectl port-forward service/product-service 8002:8000 
-
-curl -X POST http://localhost:8002/api/products/ \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Apple 2025 MacBook Pro",
-    "description": "최신 Apple MacBook Pro, M3 Max 칩, 16인치 Liquid Retina XDR 디스플레이",
-    "brand": "Apple",
-    "model": "MUW73LL/A",
-    "sku": "MBP-16-M3-MAX",
-    "upc": "195949185694",
-    "color": "Space Gray",
-    "category_ids": [1, 2, 4],
-    "primary_category_id": 4,
-    "category_breadcrumbs": ["전자제품", "컴퓨터", "노트북"],
-    "price": {
-      "amount": 3499.99,
-      "currency": "USD"
-    },
-    "stock": 100, 
-    "weight": {
-      "value": 4.8,
-      "unit": "POUND"
-    },
-    "dimensions": {
-      "length": 14.01,
-      "width": 9.77,
-      "height": 0.66,
-      "unit": "INCH"
-    },
-    "attributes": {
-      "processor": "M3 Max",
-      "ram": "32GB",
-      "storage": "1TB SSD",
-      "screen_size": "16 inch",
-      "resolution": "3456 x 2234"
-    },
-    "variants": [
-      {
-        "id": "variant1",
-        "sku": "MBP-16-M3-MAX-SG-32GB-1TB",
-        "color": "Space Gray",
-        "storage": "1TB",
-        "price": {
-          "amount": 3499.99,
-          "currency": "USD"
-        },
-        "attributes": {
-          "processor": "M3 Max",
-          "ram": "32GB"
-        },
-        "inventory": 50
-      },
-      {
-        "id": "variant2",
-        "sku": "MBP-16-M3-MAX-SIL-32GB-1TB",
-        "color": "Silver",
-        "storage": "1TB",
-        "price": {
-          "amount": 3499.99,
-          "currency": "USD"
-        },
-        "attributes": {
-          "processor": "M3 Max",
-          "ram": "32GB"
-        },
-        "inventory": 35
-      }
-    ],
-    "images": [
-      {
-        "url": "https://example.com/macbook-pro-1.jpg",
-        "main": true
-      },
-      {
-        "url": "https://example.com/macbook-pro-2.jpg",
-        "main": false
-      }
-    ]
-  }'
-```
-
-### step3) monstache 로그 확인
-
-```bash
-kubectl delete -f k8_configs/monstache_depl_serv.yaml
-
-kubectl apply -f k8_configs/monstache_depl_serv.yaml
-
-kubectl logs -f $(kubectl get pods -l app=monstache -o jsonpath="{.items[0].metadata.name}")
+show dbs
+use my_db
+show collections
+db.products.countDocuments()
 ```
 
 
-### step4) kibana 확인
-mongodb -> monstache -> elastic search로 상품정보가 들어왔는지 확인 
+### step8) 단일 curl의 get_product() latency 측정 
+```bash
+curl -o /dev/null -s -w "DNS: %{time_namelookup}s\nConnect: %{time_connect}s\nStartTransfer: %{time_starttransfer}s\nTotal: %{time_total}s\n" http://localhost:8002/api/products/mongodb/681308c41a83e18951fc9320
+```
+로컬 서버라서 DNS 조회(time_namelookup)는 거의 0에 가깝고,
+실제로는 Connect, StartTransfer, Total이 주요 지표가 됩니다.
 
-1.
+
+### step9) stress test를 위한 pid 가져오기 
+```bash
+cd stress_test
+kubectl cp extract_sample_ids.js mongodb-stateful-0:/tmp/extract_sample_ids.js
+kubectl exec -it mongodb-stateful-0 -- mongosh -u username -p password --authenticationDatabase admin --file /tmp/extract_sample_ids.js > product_ids.json
+products.json 앞부분에 에러 메시지 지우기 
+```
+
+stress_test/product_ids.json에서 pid를 찾아 
+mongodb 내부에서는 이렇게 검색
+```bash
+db.products.find({ _id: ObjectId('6813050e874120563f9ddd1f') })
+db.products.find({ _id: ObjectId('681308c41a83e18951fc92d4') })
+
+curl -o /dev/null -s -w "DNS: %{time_namelookup}s\nConnect: %{time_connect}s\nStartTransfer: %{time_starttransfer}s\nTotal: %{time_total}s\n" http://localhost:8002/api/products/mongodb/681308c41a83e18951fc9320
+DNS: 0.000010s
+Connect: 0.000213s
+StartTransfer: 0.068543s
+Total: 0.068646s%
+```
+
+### step10) 동시요청 300개일 때 get_product() latency 측정 
+```bash
+cd stress_test
+
+docker run -i --network host --volume $(pwd):/app -w /app grafana/k6 run product_load_test_mongodb.js
+```
+
+
+## j. elastic search에 stress test
+
+### step1) kibana 띄우기 
+```bash
+minikube service kibana-service 
+```
+
+### step2) elastic search로 bulk insert 
+```bash
+# bulk insert를 위한 pip lib 설치 
+pip install requests ijson tqdm 
+
+#먼저 포트를 열고 
+kubectl port-forward svc/elasticsearch-service 9201:9200 
+
+# local에서 컨테이너로 보내기 
+python faker.js/local_bulk_convert.py
+```
+
+### step3) kibana에 데이터가 잘 들어왔는지 확인
 ```bash
 minikube service kibana-service 
 
 http://127.0.0.1:62668/app/discover#/ 
 
-click discover tap 
+click discover tap -> create data view
+없으면 stack management -> data views -> create data view 
 
-create data view에서
-1. name: products
+1. name: product
 2. index pattern: my_db.products*
 3. timestamp field: 적용 안한다 선택 (왜냐면 faker.js에서 가데이터 생성시 created_at 필드 없어서 인식을 못함)
 click save data to kibana 
+
+우상단에 refresh 버튼 누르면, 실시간으로 데이터 몇개 들어와있는지 알려줌 
+```
+
+### step4) curl로 확인하기 
+
+```bash
+먼저 kibana에서 product의 pid 하나 딴 다음,
+
+curl -X GET http://localhost:8002/api/products/13vGipYBmLM9sfFoDGu8
+
+curl -o /dev/null -s -w "DNS: %{time_namelookup}s\nConnect: %{time_connect}s\nStartTransfer: %{time_starttransfer}s\nTotal: %{time_total}s\n" http://localhost:8002/api/products/2nvGipYBmLM9sfFoDGu8
+
+DNS: 0.000012s
+Connect: 0.000232s
+StartTransfer: 0.184723s
+Total: 0.184896s
+```
+
+어? 아까 mongodb에는 62ms 걸렸는데 elatic search는 18ms 걸리네?
+
+
+### step5) 샘플 pid 10000개 가져오기 
+```bash
+cd stress_test
+
+python extract_sample_ids_from_es.py
+```
+
+### step6) stress test 
+```bash
+docker run -i --network host --volume $(pwd):/app -w /app grafana/k6 run product_load_test_es.js
 ```
 

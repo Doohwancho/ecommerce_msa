@@ -80,3 +80,18 @@ async def check_products_exist(request: ProductsExistRequest):
     except Exception as e:
         logger.error(f"Failed to check products existence: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/mongodb/{product_id}", response_model=ProductResponse)
+async def get_product_mongodb_only(product_id: str):
+    """MongoDB에서만 상품 조회 (benchmark test용)"""
+    try:
+        service = ProductService()
+        product = await service.get_product_mongodb_only(product_id)
+        if not product:
+            raise HTTPException(status_code=404, detail=f"Product {product_id} not found in MongoDB")
+        return product
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get product from MongoDB {product_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
