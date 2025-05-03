@@ -4,9 +4,12 @@ metadata:
   name: monstache-config
 data:
   config.toml: |
-    mongo-url = "mongodb://username:password@mongodb-service:27017/my_db?authSource=admin"
+    # standalone 
+    # mongo-url = "mongodb://username:password@mongodb-service:27017/my_db?authSource=admin"
+    # replica set
+    mongo-url = "mongodb://username:password@mongodb-stateful-0.mongodb-service.default.svc.cluster.local:27017,mongodb-stateful-1.mongodb-service.default.svc.cluster.local:27017/my_db?replicaSet=rs0&authSource=admin"
     elasticsearch-urls = ["http://elasticsearch-service:9200"]
-    direct-read-namespaces = ["my_db.products"]
+    # direct-read-namespaces = ["my_db.products"]  # 초기 데이터 동기화 비활성화
     namespace-regex = "my_db.products"
     verbose = true
     elasticsearch-max-conns = 4
