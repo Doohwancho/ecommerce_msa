@@ -570,7 +570,7 @@ kubectl port-forward service/product-service 8002:8000
 curl -X POST http://localhost:8002/api/products/ \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "cccc Apple 2025 MacBook Pro",
+    "title": "ddd Apple 2025 MacBook Pro",
     "description": "최신 Apple MacBook Pro, M3 Max 칩, 16인치 Liquid Retina XDR 디스플레이",
     "brand": "Apple",
     "model": "MUW73LL/A",

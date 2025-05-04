@@ -36,8 +36,6 @@ class ProductService:
         try:
             # MongoDB에 저장
             product_dict = product.dict()
-            product_id = f"P{ObjectId()}"
-            product_dict["product_id"] = product_id
             current_time = datetime.now().isoformat()
             product_dict["created_at"] = current_time
             product_dict["updated_at"] = current_time
@@ -47,7 +45,8 @@ class ProductService:
                 del product_dict["stock"]
             
             collection = await self._get_collection()
-            await collection.insert_one(product_dict)
+            result = await collection.insert_one(product_dict)
+            product_id = str(result.inserted_id)  # MongoDB가 생성한 _id를 사용
             
             # MySQL에 저장 (FOR UPDATE로 잠금)
             db = await self._get_db()
@@ -76,6 +75,7 @@ class ProductService:
             
             # 응답 생성 시 stock 정보 제외
             response_data = product_dict.copy()
+            response_data["product_id"] = product_id  # MongoDB의 _id를 product_id로 사용
             return ProductResponse(**response_data)
         except Exception as e:
             logger.error(f"Error creating product: {str(e)}")
@@ -115,22 +115,25 @@ class ProductService:
                             variants.append(variant_data)
                         product_data['variants'] = variants
                     
-                    # logger.info(f"Product found in Elasticsearch: {product_id}")
                     return ProductResponse(**product_data)
             except Exception as es_error:
                 logger.warning(f"Product not found in Elasticsearch: {product_id}, error: {str(es_error)}")
             
             # 2. Elasticsearch에 없는 경우 MongoDB에서 조회
             collection = await self._get_collection()
-            product = await collection.find_one({"product_id": product_id})
+            try:
+                product = await collection.find_one({"_id": ObjectId(product_id)})
+            except:
+                product = None
+                
             if product:
                 # ObjectId를 문자열로 변환
-                if "_id" in product:
-                    product["_id"] = str(product["_id"])
+                product["product_id"] = str(product["_id"])
+                del product["_id"]
                 
                 # MongoDB에서 가져온 데이터를 ProductResponse 형식에 맞게 변환
                 response_data = {
-                    "product_id": product.get("product_id", ""),
+                    "product_id": product["product_id"],
                     "title": product.get("title", ""),
                     "description": product.get("description", ""),
                     "brand": product.get("brand"),
@@ -156,10 +159,10 @@ class ProductService:
                 logger.info(f"Product found in MongoDB: {product_id}")
                 return ProductResponse(**response_data)
             
-            logger.warning(f"Product not found in both Elasticsearch and MongoDB: {product_id}")
+            logger.warning(f"Product not found: {product_id}")
             return None
         except Exception as e:
-            logger.error(f"Error getting product {product_id}: {str(e)}")
+            logger.error(f"Error getting product: {str(e)}")
             raise e
     
     async def check_availability(self, product_id: str, quantity: int) -> tuple[bool, Optional[ProductResponse]]:
@@ -233,7 +236,7 @@ class ProductService:
         try:
             collection = await self._get_collection()
             # 현재 제품 가져오기
-            current_product = await collection.find_one({"product_id": product_id})
+            current_product = await collection.find_one({"_id": ObjectId(product_id)})
             if not current_product:
                 logger.warning(f"Product not found for update: {product_id}")
                 return None
@@ -246,33 +249,34 @@ class ProductService:
             
             # 업데이트 수행
             await collection.update_one(
-                {"product_id": product_id},
+                {"_id": ObjectId(product_id)},
                 {"$set": update_data}
             )
             
             # 업데이트된 제품 반환
-            updated_product = await collection.find_one({"product_id": product_id})
-            if "_id" in updated_product:
-                updated_product["_id"] = str(updated_product["_id"])
+            updated_product = await collection.find_one({"_id": ObjectId(product_id)})
+            if updated_product:
+                updated_product["product_id"] = str(updated_product["_id"])
+                del updated_product["_id"]
             
             logger.info(f"Product updated: {product_id}")
             return ProductResponse(**updated_product)
         except Exception as e:
-            logger.error(f"Error updating product {product_id}: {str(e)}")
+            logger.error(f"Error updating product: {str(e)}")
             raise e
     
     async def delete_product(self, product_id: str) -> bool:
         """제품 삭제"""
         try:
             collection = await self._get_collection()
-            result = await collection.delete_one({"product_id": product_id})
+            result = await collection.delete_one({"_id": ObjectId(product_id)})
             if result.deleted_count:
                 logger.info(f"Product deleted: {product_id}")
                 return True
             logger.warning(f"Product not found for deletion: {product_id}")
             return False
         except Exception as e:
-            logger.error(f"Error deleting product {product_id}: {str(e)}")
+            logger.error(f"Error deleting product: {str(e)}")
             raise e
     
     async def get_products(self, skip: int = 0, limit: int = 100) -> List[ProductResponse]:
@@ -406,10 +410,13 @@ class ProductService:
             missing_products = []
             
             for product_id in product_ids:
-                product = await collection.find_one({"product_id": product_id})
-                if product:
-                    existing_products.append(product_id)
-                else:
+                try:
+                    product = await collection.find_one({"_id": ObjectId(product_id)})
+                    if product:
+                        existing_products.append(product_id)
+                    else:
+                        missing_products.append(product_id)
+                except:
                     missing_products.append(product_id)
             
             return ProductsExistResponse(
@@ -567,17 +574,16 @@ class ProductService:
             try:
                 product = await collection.find_one({"_id": ObjectId(product_id)})
             except:
-                # ObjectId 변환 실패 시 product_id로 검색 시도
-                product = await collection.find_one({"product_id": product_id})
+                product = None
             
             if product:
                 # ObjectId를 문자열로 변환
-                if "_id" in product:
-                    product["_id"] = str(product["_id"])
+                product["product_id"] = str(product["_id"])
+                del product["_id"]
                 
                 # MongoDB에서 가져온 데이터를 ProductResponse 형식에 맞게 변환
                 response_data = {
-                    "product_id": str(product["_id"]),  # _id를 product_id로 사용
+                    "product_id": product["product_id"],
                     "title": product.get("title", ""),
                     "description": product.get("description", ""),
                     "brand": product.get("brand"),
@@ -600,11 +606,10 @@ class ProductService:
                     "created_at": product.get("created_at")
                 }
                 
-                # logger.info(f"Product found in MongoDB: {product_id}")
                 return ProductResponse(**response_data)
             
             logger.warning(f"Product not found in MongoDB: {product_id}")
             return None
         except Exception as e:
-            logger.error(f"Error getting product from MongoDB {product_id}: {str(e)}")
+            logger.error(f"Error getting product from MongoDB: {str(e)}")
             raise e
