@@ -445,7 +445,7 @@ function generateProduct() {
 
 // 메인 함수 - 스트림 방식으로 변경
 async function main() {
-  const productCount = 1000000; // 100만 개 상품
+  const productCount = 10000; // 100만 개 상품
   const batchSize = 1000; // 한 번에 처리할 상품 수
   
   console.log(`Generating ${productCount} fake products using stream method...`);

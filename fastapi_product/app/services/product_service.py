@@ -1,6 +1,6 @@
 from typing import List, Optional
 from bson import ObjectId
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.config.elasticsearch import elasticsearch_config
@@ -40,6 +40,7 @@ class ProductService:
             product_dict["product_id"] = product_id
             current_time = datetime.now().isoformat()
             product_dict["created_at"] = current_time
+            product_dict["updated_at"] = current_time
             
             # MongoDB에서는 stock 정보 제외
             if "stock" in product_dict:
@@ -239,6 +240,9 @@ class ProductService:
             
             # 업데이트할 필드
             update_data = {k: v for k, v in product_update.dict(exclude_unset=True).items()}
+
+            # updated_at
+            update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
             
             # 업데이트 수행
             await collection.update_one(

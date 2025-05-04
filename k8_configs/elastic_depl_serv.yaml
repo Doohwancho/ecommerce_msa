@@ -15,6 +15,16 @@ spec:
       containers:
         - name: elasticsearch
           image: docker.elastic.co/elasticsearch/elasticsearch:8.11.1
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              if ! bin/elasticsearch-plugin list | grep -q "analysis-nori"; then
+                echo "Installing nori plugin..."
+                bin/elasticsearch-plugin install analysis-nori --batch
+              else
+                echo "Nori plugin already installed"
+              fi
+              exec /usr/local/bin/docker-entrypoint.sh elasticsearch
           env:
             - name: discovery.type
               value: single-node
@@ -41,10 +51,14 @@ spec:
           volumeMounts:
             - name: elasticsearch-data
               mountPath: /usr/share/elasticsearch/data
+            - name: elasticsearch-plugins
+              mountPath: /usr/share/elasticsearch/plugins
       volumes:
         - name: elasticsearch-data
           persistentVolumeClaim:
             claimName: elasticsearch-pvc
+        - name: elasticsearch-plugins
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

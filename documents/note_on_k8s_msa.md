@@ -494,3 +494,166 @@ python extract_sample_ids_from_es.py
 docker run -i --network host --volume $(pwd):/app -w /app grafana/k6 run product_load_test_es.js
 ```
 
+
+### step7) elastic search에 용량 얼마나 차지했는지 확인
+
+100만개 상품데이터는 1.1GB
+@elastic_depl_serv.yaml 에 8GB 잡았다.
+```bash
+# elatic search pod의 이름 따기
+kubectl get pod
+
+# Pod에 직접 접속해서
+kubectl exec -it elasticsearch-deployment-6cc87f8677-98d99 -- bash
+
+# 내부에서 API 호출
+curl -X GET "localhost:9200/_cat/indices?v=true&pretty"
+
+# 세부정보  
+curl -X GET "localhost:9200/_nodes/stats?pretty"
+```
+
+
+## k. elastic search 검색 
+
+### step1) create fake data & insert into elastic search
+```bash
+node faker.js/product-generator.js
+mv products.json faker.js/product.json
+minikube tunnel 
+kubectl port-forward svc/elasticsearch-service 9201:9200
+python faker.js/local_bulk_convert.py
+```
+
+
+### step2) create index & re-index 
+```bash
+kubectl port-forward service/product-service 8002:8000
+curl -X POST http://localhost:8002/api/search/admin/create-index
+curl -X POST http://localhost:8002/api/search/admin/reindex
+```
+
+### step3) 다양한 검색 
+```bash
+# 기본 검색 
+curl -G "http://localhost:8002/api/search/basic" --data-urlencode "query=노트북" | grep title
+
+# 가중치 검색 
+curl -G "http://localhost:8002/api/search/weighted" --data-urlencode "query=삼성노트북"
+
+# 자동 완성 검색 
+curl -G "http://localhost:8002/api/search/autocomplete" --data-urlencode "prefix=삼"
+
+# 퍼지 검색 
+curl -G "http://localhost:8002/api/search/fuzzy" --data-urlencode "query=삼성노트북"
+
+# 고급 검색 
+curl -G "http://localhost:8002/api/search/advanced" \
+  --data-urlencode "query=노트북" \
+  --data-urlencode "brand=삼성" \
+  --data-urlencode "min_price=1000" \
+  --data-urlencode "max_price=2000000" \
+  --data-urlencode "processor=i7" \
+  --data-urlencode "ram=16GB"
+```
+
+### step4) new data to mongodb -> monstache -> elatic search 이 후, 부분 reindex 
+1. 먼저 kibana를 통해 elastic search에 `my_db.products`에 총 몇개의 상품이 있는지 확인. (stack management -> data view -> my_db.products* -> save -> discover tab -> hit 갯수 확인)
+
+2. 다음으로 kibana를 통해 elastic search에 인덱싱된 `product_search`가 몇개 있는지 확인 
+
+3. create_product()로 상품을 만들면, monstache가 elastic search로 sync해준다.
+```bash
+# Product Service (8002 포트로 포워딩)
+kubectl port-forward service/product-service 8002:8000
+
+curl -X POST http://localhost:8002/api/products/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "cccc Apple 2025 MacBook Pro",
+    "description": "최신 Apple MacBook Pro, M3 Max 칩, 16인치 Liquid Retina XDR 디스플레이",
+    "brand": "Apple",
+    "model": "MUW73LL/A",
+    "sku": "MBP-16-M3-MAX",
+    "upc": "195949185694",
+    "color": "Space Gray",
+    "category_ids": [1, 2, 4],
+    "category_path": "1/2/4",
+    "category_level": 3,
+    "primary_category_id": 4,
+    "category_breadcrumbs": ["전자제품", "컴퓨터", "노트북"],
+    "price": {
+      "amount": 3499.99,
+      "currency": "USD"
+    },
+    "stock": 100, 
+    "weight": {
+      "value": 4.8,
+      "unit": "POUND"
+    },
+    "dimensions": {
+      "length": 14.01,
+      "width": 9.77,
+      "height": 0.66,
+      "unit": "INCH"
+    },
+    "attributes": {
+      "processor": "M3 Max",
+      "ram": "32GB",
+      "storage": "1TB SSD",
+      "screen_size": "16 inch",
+      "resolution": "3456 x 2234"
+    },
+    "variants": [
+      {
+        "id": "variant1",
+        "sku": "MBP-16-M3-MAX-SG-32GB-1TB",
+        "color": "Space Gray",
+        "storage": "1TB",
+        "price": {
+          "amount": 3499.99,
+          "currency": "USD"
+        },
+        "attributes": {
+          "processor": "M3 Max",
+          "ram": "32GB"
+        },
+        "inventory": 50
+      },
+      {
+        "id": "variant2",
+        "sku": "MBP-16-M3-MAX-SIL-32GB-1TB",
+        "color": "Silver",
+        "storage": "1TB",
+        "price": {
+          "amount": 3499.99,
+          "currency": "USD"
+        },
+        "attributes": {
+          "processor": "M3 Max",
+          "ram": "32GB"
+        },
+        "inventory": 35
+      }
+    ],
+    "images": [
+      {
+        "url": "https://example.com/macbook-pro-1.jpg",
+        "main": true
+      },
+      {
+        "url": "https://example.com/macbook-pro-2.jpg",
+        "main": false
+      }
+    ]
+  }'
+```
+
+4. kibana에서 `my_db.products`에 갯수가 1개 올라갔지만, `products_search`에는 갯수가 안올라간걸 확인한다.
+5. 부분 reindex를 한다.
+```bash
+curl -X POST http://localhost:8002/api/search/admin/incremental-reindex
+curl -X GET http://localhost:8002/api/search/admin/reindex-status
+```
+
+6. kibana에서 `products_search`에 갯수가 올라간걸 확인한다.

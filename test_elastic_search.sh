@@ -24,7 +24,23 @@ kubectl apply -f ./k8_configs/mongo_depl_serv.yaml
 # Wait for MongoDB to be ready with timeout
 echo "Waiting for MongoDB to be ready..."
 kubectl wait --for=condition=Ready pod/mongodb-stateful-0 --timeout=180s
+kubectl wait --for=condition=Ready pod/mongodb-stateful-1 --timeout=180s
 echo "MongoDB readiness check completed with status $?"
+
+# Initialize MongoDB Replica Set
+echo "Initializing MongoDB Replica Set..."
+kubectl exec -it mongodb-stateful-0 -- mongosh -u $MONGO_INITDB_ROOT_USERNAME -p $MONGO_INITDB_ROOT_PASSWORD --authenticationDatabase admin --eval '
+rs.initiate({
+  _id: "rs0",
+  members: [
+    { _id: 0, host: "mongodb-stateful-0.mongodb-service.default.svc.cluster.local:27017" },
+    { _id: 1, host: "mongodb-stateful-1.mongodb-service.default.svc.cluster.local:27017" }
+  ]
+})'
+
+# Wait for Replica Set to be ready
+echo "Waiting for Replica Set to be ready..."
+sleep 10
 
 # Deploy MySQL
 echo "Deploying MySQL..."
