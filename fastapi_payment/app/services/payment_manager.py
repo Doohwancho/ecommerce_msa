@@ -1,6 +1,6 @@
 from app.config.payment_kafka import KafkaConsumer
 from app.services.payment_service import PaymentService
-from app.config.payment_database import AsyncSessionLocal
+from app.config.payment_database import WriteSessionLocal
 from app.schemas.payment_schemas import PaymentCreate, PaymentMethod  
 from app.models.outbox import Outbox
 import uuid
@@ -12,8 +12,6 @@ import datetime
 class PaymentManager:
     def __init__(self):
         self.kafka_consumer = None
-        # self.db = AsyncSessionLocal()
-        # self.payment_service = PaymentService(self.db)
         self.max_retries = 3
     
     async def initialize_kafka(self, bootstrap_servers: str, group_id: str):
@@ -29,7 +27,6 @@ class PaymentManager:
         # Kafka 소비자 시작
         await self.kafka_consumer.start()
     
-
     async def handle_order_created(self, event_data: dict):
         retry_count = 0
 
@@ -77,8 +74,8 @@ class PaymentManager:
                     stock_reserved=test_quantity  # 테스트용 (Payment SAGA 패턴 테스트)
                 )
                 
-                # 여기서 새로운 세션을 사용
-                async with AsyncSessionLocal() as session:
+                # 여기서 새로운 세션을 사용 (Write DB)
+                async with WriteSessionLocal() as session:
                     payment_service = PaymentService(session)
                     payment = await payment_service.create_payment(payment_data)
                     logger.info(f"Created payment for order {payment.order_id}")
@@ -99,8 +96,8 @@ class PaymentManager:
     async def create_compensation_event(self, original_event: dict):
         """Outbox 패턴을 사용하여 보상 이벤트 생성"""
         try:
-            # 새로운 세션 생성
-            async with AsyncSessionLocal() as session:
+            # 새로운 세션 생성 (Write DB)
+            async with WriteSessionLocal() as session:
                 async with session.begin():  # 트랜잭션 시작
                     # 실패한 결제 정보 로깅
                     order_id = original_event.get('order_id')
@@ -132,4 +129,3 @@ class PaymentManager:
     async def stop(self):
         if self.kafka_consumer:
             await self.kafka_consumer.stop()
-        # await self.db.close()

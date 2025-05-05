@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.config.database import get_async_mysql_db
+from app.config.database import get_write_db, get_read_db
 from app.services.order_manager import OrderManager
 from app.schemas import OrderCreate, OrderCreateResponse, OrderResponse, TestOrderCreate, TestOrderItemCreate
 from app.models.order import OrderStatus, OrderItem
@@ -15,11 +15,10 @@ router = APIRouter()
 @router.post("/", response_model=OrderCreateResponse)
 async def create_order(
     order: OrderCreate,
-    db: AsyncSession = Depends(get_async_mysql_db),
     # background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     logger.info("POST /api/orders/ called")
-    manager = OrderManager(db)
+    manager = OrderManager()  # DB 세션을 전달하지 않음
     try:
         # return await manager.create_order(order, background_tasks)
         return await manager.create_order(order)
@@ -28,9 +27,11 @@ async def create_order(
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.get("/{order_id}", response_model=OrderResponse)
-async def get_order(order_id: int, db: AsyncSession = Depends(get_async_mysql_db)):
+async def get_order(
+    order_id: int
+):
     logger.info(f"GET /api/orders/{order_id} called")
-    manager = OrderManager(db)
+    manager = OrderManager()  # DB 세션을 전달하지 않음
     try:
         return await manager.get_order(order_id)
     except HTTPException:
@@ -40,9 +41,11 @@ async def get_order(order_id: int, db: AsyncSession = Depends(get_async_mysql_db
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/user/{user_id}", response_model=List[OrderResponse])
-async def get_user_orders(user_id: str, db: AsyncSession = Depends(get_async_mysql_db)):
+async def get_user_orders(
+    user_id: str
+):
     logger.info(f"GET /api/orders/user/{user_id} called")
-    manager = OrderManager(db)
+    manager = OrderManager()  # DB 세션을 전달하지 않음
     try:
         return await manager.get_user_orders(user_id)
     except Exception as e:
@@ -52,11 +55,10 @@ async def get_user_orders(user_id: str, db: AsyncSession = Depends(get_async_mys
 @router.put("/{order_id}/status", response_model=OrderResponse)
 async def update_order_status(
     order_id: int, 
-    status: OrderStatus, 
-    db: AsyncSession = Depends(get_async_mysql_db)
+    status: OrderStatus
 ):
     logger.info(f"PUT /api/orders/{order_id}/status called")
-    manager = OrderManager(db)
+    manager = OrderManager()  # DB 세션을 전달하지 않음
     try:
         return await manager.update_order_status(order_id, status)
     except Exception as e:
@@ -66,7 +68,7 @@ async def update_order_status(
 # @router.post("/test/saga", response_model=OrderResponse)
 # async def create_test_order_for_saga(
 #     order_data: TestOrderCreate,
-#     db: AsyncSession = Depends(get_async_mysql_db)
+#     db: AsyncSession = Depends(get_write_db)  # Write DB 사용
 # ):
 #     """
 #     SAGA 패턴 테스트를 위한 특별한 엔드포인트.

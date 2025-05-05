@@ -5,14 +5,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.config.elasticsearch import elasticsearch_config
 from app.schemas.product import ProductCreate, ProductUpdate, ProductResponse, ProductsExistResponse, ProductInventoryResponse
-from app.config.database import get_product_collection, get_mysql_db
+from app.config.database import get_product_collection, get_mysql_db, get_read_mysql_db, get_read_db, get_write_db
 from app.models.product import Product as MySQLProduct
 from app.config.logging import logger
 
 class ProductService:
     def __init__(self):
         self.product_collection = None
-        self.db = None
+        self.write_db = None
+        self.read_db = None
     
     async def _get_collection(self):
         if self.product_collection is None:
@@ -21,12 +22,19 @@ class ProductService:
                 raise Exception("MongoDB connection failed")
         return self.product_collection
     
-    async def _get_db(self):
-        if self.db is None:
-            self.db = await get_mysql_db()
-            if self.db is None:
-                raise Exception("MySQL connection failed")
-        return self.db
+    async def _get_write_db(self):
+        if self.write_db is None:
+            self.write_db = await get_mysql_db()  # Primary DB에 연결
+            if self.write_db is None:
+                raise Exception("MySQL primary connection failed")
+        return self.write_db
+    
+    async def _get_read_db(self):
+        if self.read_db is None:
+            self.read_db = await get_read_mysql_db()  # Secondary DB에 연결
+            if self.read_db is None:
+                raise Exception("MySQL secondary connection failed")
+        return self.read_db
     
     async def _get_es(self):
         return await elasticsearch_config.get_client()
@@ -49,7 +57,7 @@ class ProductService:
             product_id = str(result.inserted_id)  # MongoDB가 생성한 _id를 사용
             
             # MySQL에 저장 (FOR UPDATE로 잠금)
-            db = await self._get_db()
+            db = await self._get_write_db()  # Write DB 사용
             stmt = select(MySQLProduct).where(MySQLProduct.product_id == product_id).with_for_update()
             result = await db.execute(stmt)
             existing_product = result.scalar_one_or_none()
@@ -205,7 +213,7 @@ class ProductService:
             tuple: (성공 여부, 메시지)
         """
         try:
-            db = await self._get_db()
+            db = await self._get_write_db()  # Write DB 사용
             
             # MySQL에서 제품 조회 (FOR UPDATE로 잠금)
             stmt = select(MySQLProduct).where(MySQLProduct.product_id == product_id).with_for_update()
@@ -439,7 +447,7 @@ class ProductService:
             bool: 예약 성공 여부
         """
         try:
-            db = await self._get_db()
+            db = await self._get_write_db()  # Write DB 사용
             
             # MySQL에서 제품 조회 (FOR UPDATE로 잠금)
             stmt = select(MySQLProduct).where(MySQLProduct.product_id == product_id).with_for_update()
@@ -480,7 +488,7 @@ class ProductService:
             bool: 해제 성공 여부
         """
         try:
-            db = await self._get_db()
+            db = await self._get_write_db()  # Write DB 사용
             
             # MySQL에서 제품 조회 (FOR UPDATE로 잠금)
             stmt = select(MySQLProduct).where(MySQLProduct.product_id == product_id).with_for_update()
@@ -520,7 +528,7 @@ class ProductService:
             bool: 확정 성공 여부
         """
         try:
-            db = await self._get_db()
+            db = await self._get_write_db()  # Write DB 사용
             
             # MySQL에서 제품 조회 (FOR UPDATE로 잠금)
             stmt = select(MySQLProduct).where(MySQLProduct.product_id == product_id).with_for_update()
@@ -551,7 +559,7 @@ class ProductService:
     async def get_product_inventory(self, product_id: str) -> Optional[ProductInventoryResponse]:
         """제품의 재고 정보 조회"""
         try:
-            db = await self._get_db()
+            db = await self._get_read_db()  # Read DB 사용
             mysql_product = await db.get(MySQLProduct, product_id)
             if not mysql_product:
                 logger.warning(f"Product {product_id} not found in MySQL")

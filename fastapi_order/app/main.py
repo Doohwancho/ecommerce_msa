@@ -1,7 +1,7 @@
 from fastapi import FastAPI, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.api import api_router
-from app.config.database import Base, async_engine, AsyncSessionLocal
+from app.config.database import Base, write_engine, read_engine, WriteSessionLocal
 from app.services.kafka_service import init_kafka_consumer, stop_kafka_consumer, kafka_consumer
 import logging
 import asyncio
@@ -50,25 +50,28 @@ async def safe_create_tables_if_not_exist(conn):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create database tables
-    async with async_engine.begin() as conn:
+    # Primary DB에 테이블 생성
+    async with write_engine.begin() as conn:
+        await safe_create_tables_if_not_exist(conn)
+    
+    # Secondary DB에도 테이블 생성
+    async with read_engine.begin() as conn:
         await safe_create_tables_if_not_exist(conn)
     
     # Initialize Kafka consumer for payment events
     await init_kafka_consumer()
     
-    # Initialize OrderManager with a new session for application-level operations
-    async with AsyncSessionLocal() as session:
-        order_manager = OrderManager(session)
-        
-        # Store order_manager in app state
-        app.state.order_manager = order_manager
-        
-        yield
-        
-        # Cleanup
-        await stop_kafka_consumer()
-        await order_manager.close()
+    # Initialize OrderManager
+    order_manager = OrderManager()
+    
+    # Store order_manager in app state
+    app.state.order_manager = order_manager
+    
+    yield
+    
+    # Cleanup
+    await stop_kafka_consumer()
+    await order_manager.close()
 
 # Dependency to get OrderManager
 async def get_order_manager() -> OrderManager:
@@ -102,7 +105,7 @@ async def readiness():
     
     # 1. MySQL DB 연결 확인
     try:
-        async with AsyncSessionLocal() as session:
+        async with WriteSessionLocal() as session:
             from sqlalchemy import text
             result = await session.execute(text("SELECT 1"))
             status["mysql"] = "connected"
@@ -146,7 +149,7 @@ async def test_connections():
     
     # MySQL 연결 테스트
     try:
-        async with AsyncSessionLocal() as session:
+        async with WriteSessionLocal() as session:
             from sqlalchemy import text
             query_result = await session.execute(text("SELECT 1"))
             row = query_result.fetchone()

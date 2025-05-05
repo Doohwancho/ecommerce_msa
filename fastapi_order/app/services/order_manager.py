@@ -18,6 +18,7 @@ import uuid
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 from app.config.kafka_consumer import OrderKafkaConsumer
+from app.config.database import WriteSessionLocal, ReadSessionLocal
 import os
 
 # 로깅 설정
@@ -25,8 +26,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class OrderManager:
-    def __init__(self, db: Session):
-        self.db = db
+    def __init__(self):
+        self.write_db = None
+        self.read_db = None
         self.kafka_consumer = OrderKafkaConsumer(
             bootstrap_servers=os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka-service:9092'),
             group_id=os.getenv('KAFKA_CONSUMER_GROUP', 'order-service-group')
@@ -36,6 +38,20 @@ class OrderManager:
         self.max_retries = 3
         self.retry_delay = 1  # seconds
     
+    async def _get_write_db(self):
+        if self.write_db is None:
+            self.write_db = WriteSessionLocal()
+            if self.write_db is None:
+                raise Exception("MySQL primary connection failed")
+        return self.write_db
+    
+    async def _get_read_db(self):
+        if self.read_db is None:
+            self.read_db = ReadSessionLocal()
+            if self.read_db is None:
+                raise Exception("MySQL secondary connection failed")
+        return self.read_db
+
     async def _store_failed_event(self, event_type: str, event_data: dict, error: str) -> None:
         """Store failed event in database"""
         try:
@@ -48,8 +64,9 @@ class OrderManager:
                 error_message=error,
                 status='pending'
             )
-            self.db.add(failed_event)
-            await self.db.commit()
+            db = await self._get_write_db()  # Write DB 사용
+            db.add(failed_event)
+            await db.commit()
             logger.info(f"Stored failed event in database: {error}")
         except Exception as e:
             logger.critical(f"Failed to store event in database: {str(e)}")
@@ -234,7 +251,8 @@ class OrderManager:
                 })
 
             # step3) 트랜잭션 시작
-            async with self.db.begin():
+            db = await self._get_write_db()  # Write DB 사용
+            async with db.begin():
                 # Create order
                 order = Order(
                     user_id=order_data.user_id,
@@ -243,8 +261,8 @@ class OrderManager:
                     created_at=datetime.datetime.utcnow(),
                     updated_at=datetime.datetime.utcnow()
                 )
-                self.db.add(order)
-                await self.db.flush()
+                db.add(order)
+                await db.flush()
 
                 # Create order items
                 for item_data in order_data.items:
@@ -256,7 +274,7 @@ class OrderManager:
                         price_at_order=product_info['product'].price,  # product의 price 사용
                         created_at=datetime.datetime.utcnow()
                     )
-                    self.db.add(order_item)
+                    db.add(order_item)
 
                 # Create outbox event for Debezium CDC
                 order_created_event = {
@@ -276,13 +294,12 @@ class OrderManager:
                     type="order_created",  # 이벤트 타입, kafka에서는 메시지 헤더의 eventType 값. ex. order_updated, order_created, order_deleted
                     payload=order_created_event  # 이벤트 데이터
                 )
-                self.db.add(outbox_event)
+                db.add(outbox_event)
 
-                await self.db.commit()
+                await db.commit()
                 logger.info(f"Order {order.order_id} created successfully with outbox event")
 
-
-            return  {
+            return {
                 "order_id": order.order_id,
                 "status": "success",
                 "message": "Order created successfully"
@@ -340,14 +357,15 @@ class OrderManager:
 
             # 트랜잭션 및 DB 처리 (내부 try~except)
             try:
-                async with self.db.begin():
+                db = await self._get_write_db()  # Write DB 사용
+                async with db.begin():
                     # 1. 주문 조회
                     query = (
                         select(Order)
                         .options(selectinload(Order.items))
                         .where(Order.order_id == int(order_id))
                     )
-                    result = await self.db.execute(query)
+                    result = await db.execute(query)
                     order = result.scalar_one_or_none()
 
                     if not order:
@@ -384,14 +402,14 @@ class OrderManager:
                         type="order_failed",
                         payload=order_failed_event
                     )
-                    self.db.add(outbox_event)
+                    db.add(outbox_event)
 
                 logger.info(f"Successfully rolled back order {order_id} due to payment failure")
 
             except Exception as e:
                 logger.error(f"Failed to update order for payment_failed event: {str(e)}")
-                if self.db.is_active:
-                    await self.db.rollback()
+                if db.is_active:
+                    await db.rollback()
                 await self._store_failed_event('payment_failed_processing', {'order_id': order_id, 'items': items}, str(e))
 
         except Exception as e:
@@ -429,14 +447,15 @@ class OrderManager:
             while retry_count < self.max_retries:
                 try:
                     # 트랜잭션 시작
-                    async with self.db.begin():
+                    db = await self._get_write_db()  # Write DB 사용
+                    async with db.begin():
                         # 1. 주문 조회
                         query = (
                             select(Order)
                             .options(selectinload(Order.items))
                             .where(Order.order_id == int(order_id))
                         )
-                        result = await self.db.execute(query)
+                        result = await db.execute(query)
                         order = result.scalar_one_or_none()
                         
                         if not order:
@@ -477,7 +496,7 @@ class OrderManager:
                             type="order_success",
                             payload=order_success_event
                         )
-                        self.db.add(outbox_event)
+                        db.add(outbox_event)
                         
                         logger.info(f"Order {order_id} status updated to COMPLETED and order_success event created")
                     
@@ -508,7 +527,8 @@ class OrderManager:
     async def create_compensation_event(self, original_event: dict):
         """Outbox 패턴을 사용하여 보상 이벤트 생성"""
         try:
-            async with self.db.begin():
+            db = await self._get_write_db()  # Write DB 사용
+            async with db.begin():
                 order_id = original_event.get('order_id')
                 logger.info(f"Creating compensation event for failed order update of order {order_id}")
                 
@@ -526,7 +546,7 @@ class OrderManager:
                     type="order_update_failed",
                     payload=compensation_event
                 )
-                self.db.add(outbox_event)
+                db.add(outbox_event)
                 logger.info(f"Compensation event for order {order_id} added to outbox")
                 
         except Exception as e:
@@ -535,12 +555,13 @@ class OrderManager:
     async def get_order(self, order_id: int) -> Order:
         logger.info(f"Fetching order {order_id}")
         # Load order with its items in a single query
+        db = await self._get_read_db()  # Read DB 사용
         query = (
             select(Order)
             .options(selectinload(Order.items))
             .where(Order.order_id == order_id)
         )
-        result = await self.db.execute(query)
+        result = await db.execute(query)
         order = result.scalar_one_or_none()
         
         if not order:
@@ -552,44 +573,52 @@ class OrderManager:
     async def get_user_orders(self, user_id: str) -> list[Order]:
         logger.info(f"Fetching orders for user {user_id}")
         # Load orders with their items in a single query
+        db = await self._get_read_db()  # Read DB 사용
         query = (
             select(Order)
             .options(selectinload(Order.items))
             .where(Order.user_id == user_id)
         )
-        result = await self.db.execute(query)
+        result = await db.execute(query)
         return result.scalars().all()
     
     async def update_order_status(self, order_id: int, status: OrderStatus) -> Order:
         logger.info(f"Updating status for order {order_id} to {status}")
         order = await self.get_order(order_id)
+        db = await self._get_write_db()  # Write DB 사용
         order.status = status
-        await self.db.commit()
+        await db.commit()
         return order
     
     async def update_order(self, order_id: str, order_update: OrderUpdate) -> Order:
         logger.info(f"Updating order {order_id}")
         order = await self.get_order(order_id)
+        db = await self._get_write_db()  # Write DB 사용
         
         # Update order fields
         for field, value in order_update.dict(exclude_unset=True).items():
             setattr(order, field, value)
         
         order.updated_at = datetime.datetime.utcnow()
-        await self.db.commit()
+        await db.commit()
         return order
     
     async def delete_order(self, order_id: str):
         logger.info(f"Deleting order {order_id}")
         order = await self.get_order(order_id)
-        await self.db.delete(order)
-        await self.db.commit()
+        db = await self._get_write_db()  # Write DB 사용
+        await db.delete(order)
+        await db.commit()
     
     async def close(self):
         """Cleanup resources"""
-        await self.db.close()
+        if self.write_db:
+            await self.write_db.close()
+        if self.read_db:
+            await self.read_db.close()
         await self.product_client.close()
         await self.user_client.close()
+
     async def start_kafka_consumer(self):
         """Start Kafka consumer in the background"""
         await self.kafka_consumer.start()

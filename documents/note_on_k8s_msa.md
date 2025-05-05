@@ -35,7 +35,68 @@ minikube tunnel
 minikube dashboard &
 ```
 
-## b. test user module
+## b. mysql에 replica set 설정 
+1. mysql-0 (primary, write)
+2. mysql-1 (secondary, read)
+
+이렇게 두개 생기는데(HA), write_db에 쓴다고 read_db에 sync가 안되기 때문에, 설정을 잡아줘야 sync 한다.
+
+```bash
+kubectl exec -it mysql-0 -- bash
+
+mysql -u root -p
+# 암호 입력 (root)
+
+# step1) primary에서 복제 사용자 생성
+CREATE USER 'replication'@'%' IDENTIFIED BY 'replication';
+GRANT REPLICATION SLAVE ON *.* TO 'replication'@'%';
+FLUSH PRIVILEGES;
+```
+
+mysql-0(primary)에서.. 
+```bash
+-- 바이너리 로그 활성화 확인
+SHOW VARIABLES LIKE 'log_bin';
+SHOW VARIABLES LIKE 'server_id';
+
+# step2) mysql-1(primary)에서 File 명이랑 Position 을 복사한다.
+-- 현재 바이너리 로그 파일과 위치 확인
+SHOW MASTER STATUS;
+
++------------------+----------+--------------+------------------+-------------------+
+| File             | Position | Binlog_Do_DB | Binlog_Ignore_DB | Executed_Gtid_Set |
++------------------+----------+--------------+------------------+-------------------+
+| mysql-bin.000003 |     9276 |              |                  |                   |
++------------------+----------+--------------+------------------+-------------------+
+1 row in set (0.00 sec)
+
+...에서 mysql-bin.000003 을 복사!
+position 9276도 복사!
+```
+
+
+mysql-1(secondary)에서..
+```bash
+# step3) primary에서 딴 file, log_pos를 입력한다.
+-- Primary 연결 설정
+CHANGE MASTER TO
+    MASTER_HOST='mysql-0.mysql-headless',
+    MASTER_USER='replication',
+    MASTER_PASSWORD='replication',
+    MASTER_LOG_FILE='mysql-bin.000003',  -- Primary에서 확인한 값
+    MASTER_LOG_POS=9276;                     -- Primary에서 확인한 값
+
+# step4) 복제 시작하면 master db 테이블에 있던 데이터를 slave db 테이블에 sync한다. (이제부터임. 이전 데이터는 sync 안함)
+-- 복제 시작
+START SLAVE;
+
+-- 복제 상태 확인
+SHOW SLAVE STATUS\G
+```
+
+
+
+## c. test user module
 ```bash
 minikube tunnel
 
@@ -67,7 +128,7 @@ curl -X GET http://localhost:8001/api/users/
 ```
 
 
-## c. test product module
+## d. test product module
 ```bash
 ############################################################
 ############################################################
@@ -80,7 +141,7 @@ kubectl port-forward service/product-service 8002:8000
 curl -X POST http://localhost:8002/api/products/ \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "Apple 2025 MacBook Pro",
+    "title": "ddd Apple 2025 MacBook Pro",
     "description": "최신 Apple MacBook Pro, M3 Max 칩, 16인치 Liquid Retina XDR 디스플레이",
     "brand": "Apple",
     "model": "MUW73LL/A",
@@ -88,8 +149,8 @@ curl -X POST http://localhost:8002/api/products/ \
     "upc": "195949185694",
     "color": "Space Gray",
     "category_ids": [1, 2, 4],
-    "category_path", "1/2/4",
-    "category_level" 3,
+    "category_path": "1/2/4",
+    "category_level": 3,
     "primary_category_id": 4,
     "category_breadcrumbs": ["전자제품", "컴퓨터", "노트북"],
     "price": {
@@ -158,6 +219,8 @@ curl -X POST http://localhost:8002/api/products/ \
     ]
   }'
 
+
+
 curl -X GET http://localhost:8002/api/products/
 
 product-service pod에 로그를 보면,
@@ -169,7 +232,7 @@ product-service pod에 로그를 보면,
 curl -X GET http://localhost:8002/api/products/P67fa37615a415218d868a076
 ```
 
-## d. test order module
+## e. test order module
 ```bash
 ############################################################
 ############################################################
@@ -182,13 +245,13 @@ kubectl port-forward service/order-service 8003:8000
 http://localhost:8003/docs#/
 
 # case1) create order -> create payment 
-curl -X POST http://localhost:8003/api/orders/ \
+ync url -X POST http://localhost:8003/api/orders/ \
   -H "Content-Type: application/json" \
   -d '{
-    "user_id": "680c715b589aa51f4407094e",
+    "user_id": "681873281feb45037e7c0f89",
     "items": [
       {
-        "product_id": "P680cd9d4d0e0cd8bc0dae8bf",
+        "product_id": "68187370dcaaa7c74565a1fc",
         "quantity": 1
       }
     ]
@@ -221,7 +284,7 @@ curl -X PUT http://localhost:8003/api/orders/1/status \
 
 
 
-## e. test category inside product module
+## f. test category inside product module
 ```bash
 ############################################################
 ############################################################
@@ -251,7 +314,7 @@ curl -X GET http://localhost:8002/api/categories/1/
 curl -X GET http://localhost:8002/api/categories/1/subcategories
 ```
 
-## f. payment 모듈 테스트 
+## g. payment 모듈 테스트 
 1. create_order() 하면,
 2. category_product mysql database에 outbox 테이블에 write 되고,
 3. 그걸 debezium이 outbox table 변화를 감지해서 kafka에 'order' 토픽에 'order_created' 이벤트로 메시지를 보내면,
@@ -271,7 +334,7 @@ curl -X GET http://localhost:8004/api/payments/
 ```
 
 
-## g. 각 모듈의 컨테이너에서 다른 모듈의 컨테이너와 통신하기
+## h. 각 모듈의 컨테이너에서 다른 모듈의 컨테이너와 통신하기
 ```bash
 # product pod 이름 가져오기
 POD_NAME=$(kubectl get pod -l app=product-service -o jsonpath="{.items[0].metadata.name}")
@@ -291,7 +354,7 @@ curl http://order-service:8000/
 ```
 
 
-## h. api-gateway
+## i. api-gateway
 ```bash
 minikube tunnel
 
@@ -304,7 +367,7 @@ curl -v -H "Host: my-deployed-app.com" http://localhost:80/api/orders
 ```
 
 
-## i. mongodb stress test 
+## j. mongodb stress test 
 
 ### step1) 디스크 용량 확보 
 ```bash 
@@ -428,7 +491,7 @@ docker run -i --network host --volume $(pwd):/app -w /app grafana/k6 run product
 ```
 
 
-## j. elastic search에 stress test
+## k. elastic search에 stress test
 
 ### step1) kibana 띄우기 
 ```bash
@@ -514,7 +577,7 @@ curl -X GET "localhost:9200/_nodes/stats?pretty"
 ```
 
 
-## k. elastic search 검색 
+## l. elastic search 검색 
 
 ### step1) create fake data & insert into elastic search
 ```bash

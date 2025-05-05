@@ -4,6 +4,8 @@ from typing import List, Optional
 from app.models.product import Category, ProductCategory
 from app.config.logging import logger
 
+# DEPRECATED
+# 이제 mysql가 아닌 mongodb에서 카테고리 관리
 class CategoryManager:
     def __init__(self, db_session: AsyncSession):
         self.session = db_session

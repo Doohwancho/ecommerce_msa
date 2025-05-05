@@ -1,6 +1,6 @@
 from app.config.kafka_consumer import KafkaConsumer
 from app.services.product_service import ProductService
-from app.config.database import async_session
+from app.config.database import WriteSessionLocal
 from app.models.outbox import Outbox
 import uuid
 import json
@@ -48,7 +48,7 @@ class ProductManager:
                         continue
                     
                     # 여기서 새로운 세션을 사용
-                    async with async_session() as session:
+                    async with WriteSessionLocal() as session:
                         product_service = ProductService()
                         logger.info(f"Calling confirm_inventory with product_id={product_id}, quantity={quantity}")
                         
@@ -89,7 +89,7 @@ class ProductManager:
                         continue
                     
                     # 여기서 새로운 세션을 사용
-                    async with async_session() as session:
+                    async with WriteSessionLocal() as session:
                         product_service = ProductService()
                         await product_service.release_inventory(product_id=product_id, quantity=quantity)
                         logger.info(f"Released inventory for product {product_id}, quantity {quantity}")

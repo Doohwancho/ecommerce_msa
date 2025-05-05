@@ -4,31 +4,132 @@ metadata:
   name: mysql-secret
 type: Opaque
 data:
-  mysql-root-password: cm9vdA==  # root password of mysql in base64,  echo -n "root" | base64
-  mysql-database: cHJvZHVjdF9jYXRlZ29yeQ==  # echo -n "product_category" | base64
+  mysql-root-password: cm9vdA==  # root
+  mysql-database: cHJvZHVjdF9jYXRlZ29yeQ==  # product_category
+  mysql-replication-password: cmVwbGljYXRpb24=  # replication
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+data:
+  primary.cnf: |
+    [mysqld]
+    server-id = 1
+    log_bin = mysql-bin
+    binlog_format = ROW
+    binlog_row_image = FULL
+    binlog_expire_logs_seconds = 86400
+    max_binlog_size = 100M
+    default_authentication_plugin = mysql_native_password
+
+  secondary.cnf: |
+    [mysqld]
+    server-id = 2
+    log_bin = mysql-bin
+    binlog_format = ROW
+    binlog_row_image = FULL
+    read_only = 1
+    default_authentication_plugin = mysql_native_password
+    
+  init-secondary.sh: |
+    #!/bin/bash
+    
+    echo "Waiting for primary to be ready..."
+    until mysql -h mysql-0.mysql-headless -u root -p${MYSQL_ROOT_PASSWORD} -e "SELECT 1"; do
+      sleep 5
+    done
+    
+    echo "Setting up replication from primary..."
+    
+    # Get binary log file and position from primary
+    MASTER_STATUS=$(mysql -h mysql-0.mysql-headless -u root -p${MYSQL_ROOT_PASSWORD} -e "SHOW MASTER STATUS\G")
+    BINLOG_FILE=$(echo "$MASTER_STATUS" | grep File | awk '{print $2}')
+    BINLOG_POS=$(echo "$MASTER_STATUS" | grep Position | awk '{print $2}')
+    
+    # Set up replication
+    mysql -u root -p${MYSQL_ROOT_PASSWORD} -e "CHANGE MASTER TO MASTER_HOST='mysql-0.mysql-headless', MASTER_USER='replication', MASTER_PASSWORD='${MYSQL_REPLICATION_PASSWORD}', MASTER_LOG_FILE='$BINLOG_FILE', MASTER_LOG_POS=$BINLOG_POS;"
+    mysql -u root -p${MYSQL_ROOT_PASSWORD} -e "START SLAVE;"
+    
+    echo "Replication set up successfully."
 ---
 apiVersion: apps/v1
-kind: Deployment
+kind: StatefulSet
 metadata:
-  name: mysql-deployment
+  name: mysql
 spec:
-  replicas: 1
   selector:
     matchLabels:
       app: mysql
+  serviceName: mysql-headless
+  replicas: 2
   template:
     metadata:
       labels:
         app: mysql
     spec:
+      initContainers:
+      - name: init-mysql
+        image: mysql:8.0.29
+        command:
+        - bash
+        - "-c"
+        - |
+          set -ex
+          # MySQL 설정 파일 복사
+          if [[ $HOSTNAME =~ -([0-9]+)$ ]]; then
+            ordinal=${BASH_REMATCH[1]}
+            if [[ $ordinal -eq 0 ]]; then
+              cp /mnt/config-map/primary.cnf /etc/mysql/conf.d/
+            else
+              cp /mnt/config-map/secondary.cnf /etc/mysql/conf.d/
+            fi
+          else
+            echo "Failed to parse hostname: $HOSTNAME"
+            exit 1
+          fi
+        volumeMounts:
+        - name: conf
+          mountPath: /etc/mysql/conf.d
+        - name: config-map
+          mountPath: /mnt/config-map
+      - name: clone-mysql
+        image: mysql:8.0.29
+        command:
+        - bash
+        - "-c"
+        - |
+          set -ex
+          # Secondary (replica) 초기화
+          if [[ $HOSTNAME =~ -([0-9]+)$ ]]; then
+            ordinal=${BASH_REMATCH[1]}
+            if [[ $ordinal -gt 0 ]]; then
+              # Secondary는 Primary(mysql-0)에서 초기 데이터 복제
+              if [[ ! -d /var/lib/mysql/mysql ]]; then
+                # 복제 사용자 생성(mysql-0에서)
+                /mnt/config-map/init-secondary.sh &
+              fi
+            fi
+          fi
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-root-password
+        - name: MYSQL_REPLICATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-replication-password
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/mysql
+        - name: config-map
+          mountPath: /mnt/config-map
       containers:
       - name: mysql
-        image: mysql:8.0.29 # arm64 architecture compatible
-        args:  
-        - --character-set-server=utf8mb4
-        - --collation-server=utf8mb4_unicode_ci
-        ports:
-        - containerPort: 3306
+        image: mysql:8.0.29
         env:
         - name: MYSQL_ROOT_PASSWORD
           valueFrom:
@@ -40,6 +141,19 @@ spec:
             secretKeyRef:
               name: mysql-secret
               key: mysql-database
+        - name: MYSQL_REPLICATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-replication-password
+        ports:
+        - name: mysql
+          containerPort: 3306
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/mysql
+        - name: conf
+          mountPath: /etc/mysql/conf.d
         resources:
           requests:
             memory: "256Mi"
@@ -47,46 +161,173 @@ spec:
           limits:
             memory: "512Mi"
             cpu: "500m"
-        volumeMounts:
-        - name: mysql-persistent-storage
-          mountPath: /var/lib/mysql
+        livenessProbe:
+          exec:
+            command: ["mysqladmin", "ping", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            # command: ["mysql", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}", "-e", "SELECT 1"]
+            command: ["sh", "-c", "mysql -u root -proot -e 'SELECT 1'"]
+          initialDelaySeconds: 30
+          periodSeconds: 5
+          timeoutSeconds: 3
       volumes:
-      - name: mysql-persistent-storage
-        persistentVolumeClaim:
-          claimName: mysql-pv-claim
+      - name: config-map
+        configMap:
+          name: mysql-config
+          defaultMode: 0755
+      - name: conf
+        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
 ---
+# Headless service for StatefulSet
 apiVersion: v1
-kind: PersistentVolumeClaim
+kind: Service
 metadata:
-  name: mysql-pv-claim
+  name: mysql-headless
 spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
+  clusterIP: None
+  selector:
+    app: mysql
+  ports:
+  - port: 3306
+    targetPort: 3306
 ---
+# Primary 서비스 (읽기/쓰기)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-primary
+spec:
+  selector:
+    statefulset.kubernetes.io/pod-name: mysql-0
+  ports:
+  - port: 3306
+    targetPort: 3306
+---
+# Secondary 서비스 (읽기 전용)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-secondary
+spec:
+  selector:
+    statefulset.kubernetes.io/pod-name: mysql-1
+  ports:
+  - port: 3306
+    targetPort: 3306
+---
+# 기존 서비스 유지 (마이그레이션 호환성)
 apiVersion: v1
 kind: Service
 metadata:
   name: mysql-service
 spec:
   selector:
-    app: mysql
+    statefulset.kubernetes.io/pod-name: mysql-0
   ports:
-  - protocol: TCP
-    port: 3306
+  - port: 3306
     targetPort: 3306
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: mysql-config
-data:
-  my.cnf: |
-    [mysqld]
-    server-id = 1
-    log_bin = mysql-bin
-    binlog_format = ROW
-    binlog_row_image = FULL
-    binlog_expire_logs_seconds = 86400
+
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: mysql-secret
+# type: Opaque
+# data:
+#   mysql-root-password: cm9vdA==  # root password of mysql in base64,  echo -n "root" | base64
+#   mysql-database: cHJvZHVjdF9jYXRlZ29yeQ==  # echo -n "product_category" | base64
+# ---
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: mysql-deployment
+# spec:
+#   replicas: 1
+#   selector:
+#     matchLabels:
+#       app: mysql
+#   template:
+#     metadata:
+#       labels:
+#         app: mysql
+#     spec:
+#       containers:
+#       - name: mysql
+#         image: mysql:8.0.29 # arm64 architecture compatible
+#         args:  
+#         - --character-set-server=utf8mb4
+#         - --collation-server=utf8mb4_unicode_ci
+#         ports:
+#         - containerPort: 3306
+#         env:
+#         - name: MYSQL_ROOT_PASSWORD
+#           valueFrom:
+#             secretKeyRef:
+#               name: mysql-secret
+#               key: mysql-root-password
+#         - name: MYSQL_DATABASE
+#           valueFrom:
+#             secretKeyRef:
+#               name: mysql-secret
+#               key: mysql-database
+#         resources:
+#           requests:
+#             memory: "256Mi"
+#             cpu: "100m"
+#           limits:
+#             memory: "512Mi"
+#             cpu: "500m"
+#         volumeMounts:
+#         - name: mysql-persistent-storage
+#           mountPath: /var/lib/mysql
+#       volumes:
+#       - name: mysql-persistent-storage
+#         persistentVolumeClaim:
+#           claimName: mysql-pv-claim
+# ---
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: mysql-pv-claim
+# spec:
+#   accessModes:
+#     - ReadWriteOnce
+#   resources:
+#     requests:
+#       storage: 1Gi
+# ---
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: mysql-service
+# spec:
+#   selector:
+#     app: mysql
+#   ports:
+#   - protocol: TCP
+#     port: 3306
+#     targetPort: 3306
+# ---
+# apiVersion: v1
+# kind: ConfigMap
+# metadata:
+#   name: mysql-config
+# data:
+#   my.cnf: |
+#     [mysqld]
+#     server-id = 1
+#     log_bin = mysql-bin
+#     binlog_format = ROW
+#     binlog_row_image = FULL
+#     binlog_expire_logs_seconds = 86400

@@ -2,7 +2,7 @@
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 from fastapi import HTTPException, Depends
 import json
 from app.schemas.payment_schemas import (
@@ -11,21 +11,38 @@ from app.schemas.payment_schemas import (
     PaymentStatus, PaymentMethod, PaymentWithTransactions
 )
 from app.models.payment_model import Payment, PaymentTransaction
-from app.config.payment_database import get_async_mysql_db
+from app.config.payment_database import get_async_mysql_db, WriteSessionLocal, ReadSessionLocal
 from app.config.payment_logging import logger
 import uuid
 from app.models.outbox import Outbox
 
 
 class PaymentService:
-    def __init__(self, db: AsyncSession):
-        self.db = db
+    def __init__(self, session: AsyncSession):
+        self.session = session
+        self.write_db = WriteSessionLocal()
+        self.read_db = ReadSessionLocal()
     
+    async def _get_write_db(self) -> AsyncSession:
+        try:
+            return self.write_db
+        except Exception as e:
+            logger.error(f"Error getting write database session: {str(e)}")
+            raise
+
+    async def _get_read_db(self) -> AsyncSession:
+        try:
+            return self.read_db
+        except Exception as e:
+            logger.error(f"Error getting read database session: {str(e)}")
+            raise
+
     async def get_all_payments(self) -> List[PaymentResponse]:
         """모든 결제 조회"""
         try:
             logger.info("Fetching all payments")
-            result = await self.db.execute(select(Payment))
+            db = await self._get_read_db()
+            result = await db.execute(select(Payment))
             payments = result.scalars().all()
             
             logger.info(f"Found {len(payments)} payments")
@@ -59,17 +76,18 @@ class PaymentService:
                 raise Exception("Simulated payment failure for SAGA testing - stock_reserved = 10")
             
             # 트랜잭션 시작
-            async with self.db.begin():
+            async with self.write_db.begin():
                 # 1. Payment 생성
                 payment = Payment(
                     order_id=payment_data.order_id,
                     amount=payment_data.amount,
                     currency=payment_data.currency,
                     payment_method=payment_data.payment_method,
-                    payment_status=PaymentStatus.PENDING
+                    payment_status=PaymentStatus.PENDING,
+                    stock_reserved=payment_data.stock_reserved
                 )
-                self.db.add(payment)
-                await self.db.flush()  # payment_id를 얻기 위해 flush
+                self.write_db.add(payment)
+                await self.write_db.flush()  # payment_id를 얻기 위해 flush
                 
                 # 2. Outbox 이벤트 생성
                 payment_created_event = {
@@ -90,11 +108,11 @@ class PaymentService:
                     type="payment_success",
                     payload=payment_created_event
                 )
-                self.db.add(outbox_event)
+                self.write_db.add(outbox_event)
                 
             
             # 트랜잭션 외부에서 조회 (트랜잭션이 완료된 후)
-            refreshed_payment = await self.db.get(Payment, payment.payment_id)
+            refreshed_payment = await self.write_db.get(Payment, payment.payment_id)
 
             logger.info(f"Payment created successfully: {refreshed_payment.payment_id}")
             return self._convert_to_payment_response(refreshed_payment)
@@ -107,7 +125,8 @@ class PaymentService:
         """결제 ID로 결제 조회"""
         try:
             logger.info(f"Fetching payment: {payment_id}")
-            payment = await self.db.get(Payment, payment_id)
+            db = await self._get_read_db()
+            payment = await db.get(Payment, payment_id)
             
             if payment:
                 logger.info(f"Payment found: {payment_id}")
@@ -128,7 +147,8 @@ class PaymentService:
         """결제 상태 업데이트"""
         try:
             logger.info(f"Updating payment: {payment_id}")
-            payment = await self.db.get(Payment, payment_id)
+            db = await self._get_write_db()
+            payment = await self.get_payment(payment_id)
             
             if not payment:
                 logger.warning(f"Payment not found for update: {payment_id}")
@@ -141,8 +161,8 @@ class PaymentService:
                 payment.payment_date = datetime.utcnow()
             
             payment.updated_at = datetime.utcnow()
-            await self.db.commit()
-            await self.db.refresh(payment)
+            await db.commit()
+            await db.refresh(payment)
             
             logger.info(f"Payment updated successfully: {payment_id}")
             return self._convert_to_payment_response(payment)
@@ -171,9 +191,9 @@ class PaymentService:
                 response_data=response_json
             )
             
-            self.db.add(transaction)
-            await self.db.commit()
-            await self.db.refresh(transaction)
+            self.write_db.add(transaction)
+            await self.write_db.commit()
+            await self.write_db.refresh(transaction)
             
             logger.info(f"Transaction created successfully for payment: {transaction_data.payment_id}")
             return TransactionResponse.from_orm(transaction)
@@ -186,7 +206,8 @@ class PaymentService:
         """결제의 모든 트랜잭션 조회"""
         try:
             logger.info(f"Fetching transactions for payment: {payment_id}")
-            result = await self.db.execute(
+            db = await self._get_read_db()
+            result = await db.execute(
                 select(PaymentTransaction)
                 .where(PaymentTransaction.payment_id == payment_id)
                 .order_by(PaymentTransaction.created_at)
@@ -271,3 +292,12 @@ class PaymentService:
         except Exception as e:
             logger.error(f"Error processing payment for order {order_id}: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
+
+    async def close(self):
+        """Close database connections"""
+        try:
+            await self.write_db.close()
+            await self.read_db.close()
+        except Exception as e:
+            logger.error(f"Error closing database connections: {str(e)}")
+            raise

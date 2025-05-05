@@ -10,7 +10,7 @@ from app.grpc.product_server import serve as grpc_serve
 from contextlib import asynccontextmanager
 # import configs
 from app.config.logging import logger
-from app.config.database import Base, engine, get_mysql_db, get_product_collection
+from app.config.database import Base, write_engine, read_engine, get_mysql_db, get_product_collection
 from app.config.elasticsearch import elasticsearch_config
 from fastapi.responses import JSONResponse
 import os
@@ -56,8 +56,12 @@ product_manager = ProductManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """애플리케이션 생명주기 관리"""
-    # 시작 시 테이블 생성
-    async with engine.begin() as conn:
+    # 시작 시 Primary DB에 테이블 생성
+    async with write_engine.begin() as conn:
+        await safe_create_tables_if_not_exist(conn)
+    
+    # Secondary DB에도 테이블 생성
+    async with read_engine.begin() as conn:
         await safe_create_tables_if_not_exist(conn)
     
     # Elasticsearch 초기화

@@ -22,6 +22,12 @@ spec:
             - name: http
               containerPort: 8000
           env:
+            - name: MYSQL_PRIMARY_HOST
+              value: "mysql-0.mysql-headless"
+            - name: MYSQL_SECONDARY_HOST
+              value: "mysql-1.mysql-headless"
+            - name: MYSQL_PORT
+              value: "3306"
             - name: MYSQL_USER
               value: "root"
             - name: MYSQL_PASSWORD

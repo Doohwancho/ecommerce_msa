@@ -86,7 +86,7 @@ basic ecommerce MSA
     5. 동의어사전 & 유의어사전 
 9. Q. k8s container의 안정성을 높히는 방법은? (yet)
     1. 헬스 체크 및 정상 종료 구현(다른 모든 것의 기반이 됨)
-    2. HA구성 (가용성 확보): replica set, load balancing 설정
+    2. HA구성 (가용성 확보 + 단일 장애점 제거): replica set(여러 pod 복제본 유지), load balancing(트래픽을 여러 pod에 분산하여 한 pod가 죽어도 서비스 지속) 설정
     3. open telemetry 표준
     4. loging to beats + elastic search
     5. tracing(jaeger)
@@ -1492,4 +1492,36 @@ index 만들 때 필터에서 생성한다.
   - ex. 빨갛ㄴ색 -> 빨간색
 - autocomplete
   - 삼성 -> 삼성전자
+
+
+# K. k8s container의 안정성을 높히는 방법은? (yet)
+## roadmap 
+1. 헬스 체크 및 정상 종료 구현(다른 모든 것의 기반이 됨)
+2. HA구성 (가용성 확보 + 단일 장애점 제거): replica set(여러 pod 복제본 유지), load balancing(트래픽을 여러 pod에 분산하여 한 pod가 죽어도 서비스 지속) 설정
+3. open telemetry 표준
+4. loging to beats + elastic search
+5. tracing(jaeger)
+6. istio for circuit breaker, Resilience4J for 복원
+7. stress test -> 장애 복구
+
+## a. HA 구성 및 장애 복구 
+### a-1. mysql HA 및 장애복구 시나리오 
+primary(write) - secondary(read) replica set 구성.\
+secondary가 primary로부터 데이터를 복사한다. 
+
+Q. Primary(mysql-0)에 장애가 발생하면?
+1. StatefulSet 컨트롤러가 자동으로 Pod를 재시작
+2. 데이터는 PersistentVolume에 저장되어 있으므로 손실되지 않음
+3. 재시작 동안 Secondary(mysql-1)에서 읽기 쿼리 처리 가능
+
+Q. Secondary(mysql-1)에 장애가 발생하면?
+- 자동으로 재시작되고 Primary에 다시 연결되어 복제 재개
+
+### a-2. mongodb HA 및 장애복구 시나리오  
+
+### a-3. elastic search HA 및 장애복구 시나리오  
+
+### a-4. kafka HA 및 장애복구 시나리오  
+
+### a-5. zookeeper HA 및 장애복구 시나리오  
 
