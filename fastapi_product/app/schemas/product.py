@@ -68,7 +68,7 @@ class ProductUpdate(BaseModel):
     images: Optional[List[Image]] = None
 
 class ProductResponse(BaseModel):
-    product_id: str  # MongoDB의 _id를 문자열로 변환한 값
+    product_id: str
     title: str
     description: str
     brand: Optional[str] = None

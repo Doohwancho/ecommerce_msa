@@ -1,16 +1,29 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.api import api_router
-from app.config.database import Base, engine
 from app.services.product_manager import ProductManager
-from app.config.elasticsearch import elasticsearch_config
-from contextlib import asynccontextmanager
-from app.config.logging import logger
 from sqlalchemy import text
 import os
 import asyncio
+# import grpc config
 from app.grpc.product_server import serve as grpc_serve
+from contextlib import asynccontextmanager
+# import configs
+from app.config.logging import logger
+from app.config.database import Base, engine, get_mysql_db, get_product_collection
+from app.config.elasticsearch import elasticsearch_config
+from fastapi.responses import JSONResponse
+import os
 
+
+_grpc_task = None
+
+def set_grpc_task(task):
+    global _grpc_task
+    _grpc_task = task
+
+def get_grpc_task():
+    return _grpc_task
 
 async def safe_create_tables_if_not_exist(conn):
     """테이블이 존재하지 않는 경우에만 생성"""
@@ -57,6 +70,7 @@ async def lifespan(app: FastAPI):
     
     # Start gRPC server in background
     grpc_task = asyncio.create_task(grpc_serve())
+    set_grpc_task(grpc_task)
     logger.info("gRPC server started on port 50051")
 
     # Kafka 초기화
@@ -77,6 +91,7 @@ async def lifespan(app: FastAPI):
 
     # Cancel gRPC task
     if grpc_task:
+        logger.info("Shutting down product gRPC server")
         grpc_task.cancel()
         try:
             await grpc_task
@@ -94,11 +109,124 @@ app = FastAPI(
 # API 라우터 등록
 app.include_router(api_router, prefix="/api")
 
-# 헬스 체크 엔드포인트
-@app.get("/health")
-async def health_check():
-    """서비스 상태 확인"""
-    return {"status": "healthy"}
+
+@app.get("/health/live")
+async def liveness():
+    """
+    Liveness probe - 컨테이너가 살아있는지 확인
+    """
+    return {"status": "alive"}
+
+@app.get("/health/ready")
+async def readiness():
+    """
+    Readiness probe - 서비스가 요청을 처리할 준비가 되었는지 확인
+    """
+    errors = []
+    status = {}
+    
+    # 1. MySQL DB 연결 확인
+    try:
+        db_session = await get_mysql_db()
+        async with db_session.begin():
+            # text()로 SQL 쿼리 래핑
+            from sqlalchemy import text
+            result = await db_session.execute(text("SELECT 1"))
+            status["mysql"] = "connected"
+        await db_session.close()
+    except Exception as e:
+        logger.error(f"MySQL connection failed: {str(e)}")
+        errors.append(f"MySQL: {str(e)}")
+        status["mysql"] = "failed"
+
+    # 2. MongoDB 연결 확인
+    try:
+        product_collection = await get_product_collection()
+        # None과 비교하는 대신 컬렉션이 있는지 확인
+        if product_collection is not None:
+            # 간단한 쿼리 실행 (count 같은 간단한 작업)
+            count = await product_collection.count_documents({})
+            status["mongodb"] = "connected"
+        else:
+            errors.append("MongoDB: Failed to get collection")
+            status["mongodb"] = "failed"
+    except Exception as e:
+        logger.error(f"MongoDB connection failed: {str(e)}")
+        errors.append(f"MongoDB: {str(e)}")
+        status["mongodb"] = "failed"
+    
+    # 3. Elasticsearch 연결 확인
+    try:
+        es_client = await elasticsearch_config.get_client()
+        info = await es_client.info()
+        status["elasticsearch"] = "connected"
+    except Exception as e:
+        logger.error(f"Elasticsearch connection failed: {str(e)}")
+        errors.append(f"Elasticsearch: {str(e)}")
+        status["elasticsearch"] = "failed"
+    
+    # 4. gRPC 서버 상태 확인 (필요한 경우)
+    try:
+        grpc_task = get_grpc_task()
+        if not grpc_task or grpc_task.done():
+            errors.append("gRPC server is not running")
+            status["grpc"] = "failed"
+        else:
+            status["grpc"] = "running"
+    except Exception as e:
+        logger.error(f"gRPC check failed: {str(e)}")
+        errors.append(f"gRPC: {str(e)}")
+        status["grpc"] = "failed"
+    
+    # 결과 반환
+    if errors:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not ready", "details": status, "errors": errors}
+        )
+    
+    return {"status": "ready", "details": status}
+
+
+@app.get("/test-connections")
+async def test_connections():
+    """
+    모든 외부 연결을 테스트하는 엔드포인트 (디버깅용)
+    """
+    result = {}
+    
+    # MySQL 연결 테스트
+    try:
+        db_session = await get_mysql_db()
+        async with db_session.begin():
+            from sqlalchemy import text
+            query_result = await db_session.execute(text("SELECT 1"))
+            result["mysql"] = "connected"
+        await db_session.close()
+    except Exception as e:
+        result["mysql"] = {"error": str(e)}
+    
+    # MongoDB 연결 테스트
+    try:
+        product_collection = await get_product_collection()
+        if product_collection is not None:
+            count = await product_collection.count_documents({})
+            result["mongodb"] = {"connected": True, "document_count": count}
+        else:
+            result["mongodb"] = {"error": "Failed to get collection"}
+    except Exception as e:
+        result["mongodb"] = {"error": str(e)}
+    
+    # Elasticsearch 연결 테스트
+    try:
+        es_client = await elasticsearch_config.get_client()
+        info = await es_client.info()
+        result["elasticsearch"] = {"connected": True, "version": info.get("version", {}).get("number", "unknown")}
+    except Exception as e:
+        result["elasticsearch"] = {"error": str(e)}
+    
+    return result
+
 
 # 루트 엔드포인트
 @app.get("/")

@@ -85,27 +85,13 @@ basic ecommerce MSA
     4. 다양한 검색방법론 
     5. 동의어사전 & 유의어사전 
 9. Q. k8s container의 안정성을 높히는 방법은? (yet)
-    1. 장애 격리를 위한 서킷 브레이커 패턴을 Istio와 함께 구현
-    2. open telemetry를 표준 삼아서,
-    3. logging pipeline 구축: beats + elastic search + kibana에 '구조화된' 로깅 구현
-    4. 모니터링:  prometheus + grafana에
-    5. tracing은 jaeger 설치 후, stress test로 어느곳에 트래픽 몰리는지 확인 후, 일부러 터지게 한 다음, distributed tracing 해보기
-        - 터진 부분에 Resilience4j 라든가 하여튼 회복 탄력성 관련된 것 도입
-        - 장애 발생시 응답 실패율 어떻게 줄였고 
-        - 차단후 복구 시간은 어떻게 되고
-        - OpenTelemetry SDK로 서비스 계측
-        - 샘플 오류 시나리오 생성
-        - 트레이스 정보 분석
-    6. HA:
-        - 마이크로서비스를 위한 여러 레플리카 구성(mongodb replica set, etc)
-        - Kubernetes 로드 밸런싱 설정 (fastapi_modules들(user, product, order, payment) 2개 이상 띄우고, 하나가 에러나면 다른하나에 로드밸런서로 트래픽 쏠리게끔 유도하기 )
-        - 장애 시나리오로 서비스 복원력 테스트
-        - Pod 중단 예산 구현
-    7. 헬스 체크 및 정상 종료 구현
-        - liveness 및 readiness 프로브 구성
-        - 정상 종료 핸들러 구현
-        - 서비스 복구 시나리오 테스트
-        - 재시작 정책 최적화
+    1. 헬스 체크 및 정상 종료 구현(다른 모든 것의 기반이 됨)
+    2. HA구성 (가용성 확보): replica set, load balancing 설정
+    3. open telemetry 표준
+    4. loging to beats + elastic search
+    5. tracing(jaeger)
+    6. istio for circuit breaker, Resilience4J for 복원
+    7. stress test -> 장애 복구
 10. Q. 무중단으로 자동화 배포하는 방법은? (yet)
     1. 로컬에 jenkins 서버 띄워보기
         - Jenkins 설치 및 구성

@@ -181,3 +181,4 @@ products.json
 products-*.json
 elasticsearch_product_ids.json
 product_ids.json
+es_import.log
