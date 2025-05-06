@@ -24,11 +24,17 @@ spec:
             - name: grpc
               containerPort: 50051
           env:
-            - name: MONGODB_URL
-              valueFrom:
-                configMapKeyRef:
-                  name: mongodb-configmap
-                  key: database_url
+            - name: MONGODB_HOST
+              value: "mongodb-stateful-0.mongodb-service,mongodb-stateful-1.mongodb-service, mongodb-stateful-2.mongodb-service"
+            - name: MONGODB_REPLICA_SET
+              value: "rs0"
+            - name: MONGODB_AUTH_SOURCE
+              value: "admin"
+            # - name: MONGODB_URL
+            #   valueFrom:
+            #     configMapKeyRef:
+            #       name: mongodb-configmap
+            #       key: database_url
             - name: MONGODB_USERNAME
               valueFrom:
                 secretKeyRef:

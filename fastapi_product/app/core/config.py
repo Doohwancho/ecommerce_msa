@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     MYSQL_DATABASE: str = os.getenv("MYSQL_DATABASE", "product_category")
     
     # MongoDB Settings
-    MONGODB_URL: str = os.getenv("MONGODB_URL", "mongodb-service:27017")
+    # MONGODB_URL: str = os.getenv("MONGODB_URL", "mongodb-service:27017")
     MONGODB_USERNAME: str = os.getenv("MONGODB_USERNAME", "mongo")
     MONGODB_PASSWORD: str = os.getenv("MONGODB_PASSWORD", "mongo")
     

@@ -1523,9 +1523,13 @@ Q. Primary(mysql-0)에 장애가 발생하면?
 Q. Secondary(mysql-1)에 장애가 발생하면?
 - 자동으로 재시작되고 Primary에 다시 연결되어 복제 재개
 
-
-
 ### a-3. mongodb HA 및 장애복구 시나리오
+- mongodb도 mysql처럼 primary(1 write db), secondary(2 read replica)로 나눠서, CRUD를 R / CUD 따로 처리한다.
+- 자동 fail over 복구는 node를 3개(1 write, 2 read)만들면 자동 처리 된다고 한다. 
+- Primary 노드가 실패하면 남은 Secondary 노드들이 자동으로 선거를 진행하여 새로운 Primary를 선출합니다. 이 과정은 일반적으로 몇 초 내에 완료된다.
+- 실패했던 노드가 다시 온라인 상태가 되면, 자동으로 replica set에 다시 합류하고 현재 Primary로부터 데이터를 동기화한 후 Secondary 역할을 다시 수행한다.
+- 중요한 것은 failover가 발생하려면 과반수(majority) 노드가 서로 통신할 수 있어야 합니다. 3개 노드인 경우 최소 2개 노드가 서로 통신할 수 있어야 선거가 진행된다. (이것이 바로 2개 노드만 있을 때 자동 failover가 불가능한 이유)
+
 
 ### a-4. elastic search HA 및 장애복구 시나리오
 

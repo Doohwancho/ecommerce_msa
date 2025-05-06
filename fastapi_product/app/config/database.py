@@ -113,7 +113,7 @@ async def get_read_mysql_db():
 #################################################
 
 # mongodb 연결 설정
-MONGODB_HOST = os.getenv("MONGODB_HOST", "mongodb-stateful-0.mongodb-service,mongodb-stateful-1.mongodb-service")
+MONGODB_HOST = os.getenv("MONGODB_HOST", "mongodb-stateful-0.mongodb-service,mongodb-stateful-1.mongodb-service,mongodb-stateful-2.mongodb-service")
 MONGODB_REPLICA_SET = os.getenv("MONGODB_REPLICA_SET", "rs0")
 MONGODB_AUTH_SOURCE = os.getenv("MONGODB_AUTH_SOURCE", "admin")
 MONGODB_USERNAME = os.getenv("MONGODB_USERNAME", "username") # dXNlcm5hbWU=

@@ -25,7 +25,7 @@ spec:
               containerPort: 50051
           env:
             - name: MONGODB_HOST
-              value: "mongodb-stateful-0.mongodb-service,mongodb-stateful-1.mongodb-service"
+              value: "mongodb-stateful-0.mongodb-service,mongodb-stateful-1.mongodb-service, mongodb-stateful-2.mongodb-service"
             - name: MONGODB_REPLICA_SET
               value: "rs0"
             - name: MONGODB_AUTH_SOURCE
