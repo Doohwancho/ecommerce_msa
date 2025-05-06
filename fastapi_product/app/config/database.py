@@ -113,35 +113,49 @@ async def get_read_mysql_db():
 #################################################
 
 # mongodb 연결 설정
-MONGODB_HOST = os.getenv("MONGODB_HOST", "mongodb-service")
+MONGODB_HOST = os.getenv("MONGODB_HOST", "mongodb-stateful-0.mongodb-service,mongodb-stateful-1.mongodb-service")
 MONGODB_REPLICA_SET = os.getenv("MONGODB_REPLICA_SET", "rs0")
 MONGODB_AUTH_SOURCE = os.getenv("MONGODB_AUTH_SOURCE", "admin")
 MONGODB_USERNAME = os.getenv("MONGODB_USERNAME", "username") # dXNlcm5hbWU=
 MONGODB_PASSWORD = os.getenv("MONGODB_PASSWORD", "password") # cGFzc3dvcmQ=
 
 # 공유 MongoDB 클라이언트
-_mongo_client = None
+_write_mongo_client = None
+_read_mongo_client = None
 
+def get_write_mongo_client():
+    """
+    Primary MongoDB 클라이언트 객체를 반환 (쓰기 작업용)
+    """
+    global _write_mongo_client
+    
+    if _write_mongo_client is None:
+        connection_string = f"mongodb://{MONGODB_USERNAME}:{MONGODB_PASSWORD}@{MONGODB_HOST}/my_db?replicaSet={MONGODB_REPLICA_SET}&authSource={MONGODB_AUTH_SOURCE}&readPreference=primary"
+        _write_mongo_client = AsyncIOMotorClient(connection_string)
+        logger.info("MongoDB write client initialized")
+    
+    return _write_mongo_client
 
-def get_mongo_client():
+def get_read_mongo_client():
     """
-    MongoDB 클라이언트 객체를 반환
+    Secondary MongoDB 클라이언트 객체를 반환 (읽기 작업용)
     """
-    global _mongo_client
+    global _read_mongo_client
     
-    if _mongo_client is None:
-        connection_string = f"mongodb://{MONGODB_USERNAME}:{MONGODB_PASSWORD}@{MONGODB_HOST}:27017/?replicaSet={MONGODB_REPLICA_SET}&authSource={MONGODB_AUTH_SOURCE}"
-        _mongo_client = AsyncIOMotorClient(connection_string)
-        logger.info("MongoDB client initialized")
+    if _read_mongo_client is None:
+        connection_string = f"mongodb://{MONGODB_USERNAME}:{MONGODB_PASSWORD}@{MONGODB_HOST}/my_db?replicaSet={MONGODB_REPLICA_SET}&authSource={MONGODB_AUTH_SOURCE}&readPreference=secondary"
+        _read_mongo_client = AsyncIOMotorClient(connection_string)
+        logger.info("MongoDB read client initialized")
     
-    return _mongo_client
+    return _read_mongo_client
 
 # MongoDB 비동기 설정
-async def get_product_collection() -> AgnosticCollection:
+async def get_write_product_collection() -> AgnosticCollection:
+    """
+    쓰기 작업용 MongoDB 컬렉션 반환
+    """
     try:
-        # 공유 클라이언트 사용
-        mongo_client = get_mongo_client()
-        # 명시적으로 데이터베이스와 컬렉션 생성
+        mongo_client = get_write_mongo_client()
         mongo_db = mongo_client.my_db
         
         # 컬렉션이 존재하는지 확인하고 없으면 생성
@@ -151,8 +165,22 @@ async def get_product_collection() -> AgnosticCollection:
             logger.info("Created products collection")
         
         product_collection = mongo_db.products
-        logger.info("MongoDB connection successful and collection verified")
+        logger.info("MongoDB write connection successful and collection verified")
         return product_collection
     except Exception as e:
-        logger.error(f"MongoDB connection error: {e}")
+        logger.error(f"MongoDB write connection error: {e}")
+        return None
+
+async def get_read_product_collection() -> AgnosticCollection:
+    """
+    읽기 작업용 MongoDB 컬렉션 반환
+    """
+    try:
+        mongo_client = get_read_mongo_client()
+        mongo_db = mongo_client.my_db
+        product_collection = mongo_db.products
+        logger.info("MongoDB read connection successful")
+        return product_collection
+    except Exception as e:
+        logger.error(f"MongoDB read connection error: {e}")
         return None

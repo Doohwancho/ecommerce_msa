@@ -75,15 +75,15 @@ basic ecommerce MSA
     3. 재고량 & 예약재고량을 nosql에서 트래킹하는게 맞을까?
     4. 도입
 7. Q. ecommerce에서 상품의 read optimization?
-    1. mongodb에 100만 데이터 넣고 stress test 
-    2. elastic search에 100만 데이터 넣고 stress test 후 결과 비교 
+    1. mongodb에 100만 데이터 넣고 stress test
+    2. elastic search에 100만 데이터 넣고 stress test 후 결과 비교
     3. monstache로 mongodb replica set과 elastic search 실시간 sync
-8. Q. 상품 검색 방법? 
-    1. tokenizers 비교 
-    2. 형태소 분석기 비교 
-    3. all_text로 검색 걸리는 필드 합치기 
-    4. 다양한 검색방법론 
-    5. 동의어사전 & 유의어사전 
+8. Q. 상품 검색 방법?
+    1. tokenizers 비교
+    2. 형태소 분석기 비교
+    3. all_text로 검색 걸리는 필드 합치기
+    4. 다양한 검색방법론
+    5. 동의어사전 & 유의어사전
 9. Q. k8s container의 안정성을 높히는 방법은? (yet)
     1. 헬스 체크 및 정상 종료 구현(다른 모든 것의 기반이 됨)
     2. HA구성 (가용성 확보 + 단일 장애점 제거): replica set(여러 pod 복제본 유지), load balancing(트래픽을 여러 pod에 분산하여 한 pod가 죽어도 서비스 지속) 설정
@@ -480,7 +480,7 @@ create_order()을 하면, user_validation() 해야해서 유저 모듈과 통신
 # E. MSA에서 동기? 비동기?
 
 ## a. 결론
-- fastapi가 single main thread가 main loop에서 비동기로 처리하면서, 무거운 작업은 별도 쓰레드풀에게 할당하는 식으로 동작한다.
+- fastapi는 single main thread가 main loop에서 비동기로 처리하면서, 무거운 작업은 별도 쓰레드풀에게 할당하는 식으로 동작한다. (마치 nodejs 처럼)
 - ecommerce는 요청이 1초 내 빠르게 처리해야하는 OLTP 특성을 가졌기 때문에, 가벼운 대부분 요청은 비동기로 처리하고 무거운 작업만 별도로 빼서 쓰레드풀에게 할당하여 처리한다.
 - MSA는 각 모듈간 분리 시키고, 하나의 모듈에서 에러 터진게 다른 모듈로 전파되면 안되기 때문에, 비동기 방식으로 통신해서 서로 분리시킨다.
 
@@ -1443,12 +1443,12 @@ all_text에 모든 정보가 있다고, 다른 중복되는 필드를 버리지�
 ## f. nori - 동의어, 유의어 사전
 index 만들 때 필터에서 생성한다.
 
-### case1)유의어 사전 
+### case1)유의어 사전
 ```json
 "tokenizer": {
   //...
-  "nori_user_dict": {  
-      "type": "nori_tokenizer",  
+  "nori_user_dict": {
+      "type": "nori_tokenizer",
       "decompound_mode": "mixed",
       "user_dictionary_rules": [
           "운동화",
@@ -1462,7 +1462,7 @@ index 만들 때 필터에서 생성한다.
 따라서 운동화는 운동 + 화가 아니라 그냥 운동화야~ 라고 인덱스 만들 때 사전에 입력해주면 검색 정확도를 올릴 수 있다.
 
 
-### case2) 동의어 사전 
+### case2) 동의어 사전
 ```json
 "filter": {
   "korean_synonym_filter": {
@@ -1495,7 +1495,7 @@ index 만들 때 필터에서 생성한다.
 
 
 # K. k8s container의 안정성을 높히는 방법은? (yet)
-## roadmap 
+## roadmap
 1. 헬스 체크 및 정상 종료 구현(다른 모든 것의 기반이 됨)
 2. HA구성 (가용성 확보 + 단일 장애점 제거): replica set(여러 pod 복제본 유지), load balancing(트래픽을 여러 pod에 분산하여 한 pod가 죽어도 서비스 지속) 설정
 3. open telemetry 표준
@@ -1504,10 +1504,16 @@ index 만들 때 필터에서 생성한다.
 6. istio for circuit breaker, Resilience4J for 복원
 7. stress test -> 장애 복구
 
-## a. HA 구성 및 장애 복구 
-### a-1. mysql HA 및 장애복구 시나리오 
+## a. HA 구성 및 장애 복구
+## a-1. 헬스 체크 및 정상 종료 구현
+1. `GET /health/live`로 컨테이너가 떴는지 확인하고
+2. `GET /health/ready`로 fastapi가 각종 db와 config가 세팅 완료되었는지 확인한다.
+
+이 health check가 컨테이너 복구의 기반이 된다.
+
+### a-2. mysql HA 및 장애복구 시나리오
 primary(write) - secondary(read) replica set 구성.\
-secondary가 primary로부터 데이터를 복사한다. 
+secondary가 primary로부터 데이터를 복사한다.
 
 Q. Primary(mysql-0)에 장애가 발생하면?
 1. StatefulSet 컨트롤러가 자동으로 Pod를 재시작
@@ -1517,11 +1523,13 @@ Q. Primary(mysql-0)에 장애가 발생하면?
 Q. Secondary(mysql-1)에 장애가 발생하면?
 - 자동으로 재시작되고 Primary에 다시 연결되어 복제 재개
 
-### a-2. mongodb HA 및 장애복구 시나리오  
 
-### a-3. elastic search HA 및 장애복구 시나리오  
 
-### a-4. kafka HA 및 장애복구 시나리오  
+### a-3. mongodb HA 및 장애복구 시나리오
 
-### a-5. zookeeper HA 및 장애복구 시나리오  
+### a-4. elastic search HA 및 장애복구 시나리오
+
+### a-5. kafka HA 및 장애복구 시나리오
+
+### a-6. zookeeper HA 및 장애복구 시나리오
 

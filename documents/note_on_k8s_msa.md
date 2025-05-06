@@ -94,6 +94,26 @@ START SLAVE;
 SHOW SLAVE STATUS\G
 ```
 
+## c. mongodb에 replica set 설정 
+
+```bash
+# admin 데이터베이스로 첫번째 pod에 접속
+kubectl exec -it mongodb-stateful-0 -- mongosh -u $MONGO_INITDB_ROOT_USERNAME -p $MONGO_INITDB_ROOT_PASSWORD --authenticationDatabase admin
+
+# Replica Set 초기화
+# 안됬었는데 주소 바꾸고 재시도 해보자 
+rs.initiate({
+  _id: "rs0",
+  members: [
+    { _id: 0, host: "mongodb-stateful-0.mongodb-service.default.svc.cluster.local:27017" },
+    { _id: 1, host: "mongodb-stateful-1.mongodb-service.default.svc.cluster.local:27017" }
+  ]
+})
+
+rs.status()
+```
+
+
 
 
 ## c. test user module

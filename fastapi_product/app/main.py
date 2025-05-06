@@ -10,7 +10,10 @@ from app.grpc.product_server import serve as grpc_serve
 from contextlib import asynccontextmanager
 # import configs
 from app.config.logging import logger
-from app.config.database import Base, write_engine, read_engine, get_mysql_db, get_product_collection
+from app.config.database import (
+    Base, write_engine, read_engine, get_mysql_db,
+    get_write_product_collection, get_read_product_collection
+)
 from app.config.elasticsearch import elasticsearch_config
 from fastapi.responses import JSONResponse
 import os
@@ -143,21 +146,29 @@ async def readiness():
         errors.append(f"MySQL: {str(e)}")
         status["mysql"] = "failed"
 
-    # 2. MongoDB 연결 확인
+    # 2. MongoDB 연결 확인 (Write & Read)
     try:
-        product_collection = await get_product_collection()
-        # None과 비교하는 대신 컬렉션이 있는지 확인
-        if product_collection is not None:
-            # 간단한 쿼리 실행 (count 같은 간단한 작업)
-            count = await product_collection.count_documents({})
-            status["mongodb"] = "connected"
+        # Write DB 확인
+        write_collection = await get_write_product_collection()
+        if write_collection is not None:
+            status["mongodb_write"] = "connected"
         else:
-            errors.append("MongoDB: Failed to get collection")
-            status["mongodb"] = "failed"
+            errors.append("MongoDB Write: Failed to get collection")
+            status["mongodb_write"] = "failed"
+            
+        # Read DB 확인
+        read_collection = await get_read_product_collection()
+        if read_collection is not None:
+            status["mongodb_read"] = "connected"
+        else:
+            errors.append("MongoDB Read: Failed to get collection")
+            status["mongodb_read"] = "failed"
+            
     except Exception as e:
         logger.error(f"MongoDB connection failed: {str(e)}")
         errors.append(f"MongoDB: {str(e)}")
-        status["mongodb"] = "failed"
+        status["mongodb_write"] = "failed"
+        status["mongodb_read"] = "failed"
     
     # 3. Elasticsearch 연결 확인
     try:
@@ -169,7 +180,7 @@ async def readiness():
         errors.append(f"Elasticsearch: {str(e)}")
         status["elasticsearch"] = "failed"
     
-    # 4. gRPC 서버 상태 확인 (필요한 경우)
+    # 4. gRPC 서버 상태 확인
     try:
         grpc_task = get_grpc_task()
         if not grpc_task or grpc_task.done():
@@ -210,14 +221,24 @@ async def test_connections():
     except Exception as e:
         result["mysql"] = {"error": str(e)}
     
-    # MongoDB 연결 테스트
+    # MongoDB 연결 테스트 (Write & Read)
     try:
-        product_collection = await get_product_collection()
-        if product_collection is not None:
-            count = await product_collection.count_documents({})
-            result["mongodb"] = {"connected": True, "document_count": count}
+        # Write DB 테스트
+        write_collection = await get_write_product_collection()
+        if write_collection is not None:
+            count = await write_collection.count_documents({})
+            result["mongodb_write"] = {"connected": True, "document_count": count}
         else:
-            result["mongodb"] = {"error": "Failed to get collection"}
+            result["mongodb_write"] = {"error": "Failed to get write collection"}
+            
+        # Read DB 테스트
+        read_collection = await get_read_product_collection()
+        if read_collection is not None:
+            count = await read_collection.count_documents({})
+            result["mongodb_read"] = {"connected": True, "document_count": count}
+        else:
+            result["mongodb_read"] = {"error": "Failed to get read collection"}
+            
     except Exception as e:
         result["mongodb"] = {"error": str(e)}
     

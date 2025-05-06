@@ -5,22 +5,33 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.config.elasticsearch import elasticsearch_config
 from app.schemas.product import ProductCreate, ProductUpdate, ProductResponse, ProductsExistResponse, ProductInventoryResponse
-from app.config.database import get_product_collection, get_mysql_db, get_read_mysql_db, get_read_db, get_write_db
+from app.config.database import (
+    get_write_product_collection, get_read_product_collection,
+    get_mysql_db, get_read_mysql_db, get_read_db, get_write_db
+)
 from app.models.product import Product as MySQLProduct
 from app.config.logging import logger
 
 class ProductService:
     def __init__(self):
-        self.product_collection = None
+        self.write_collection = None
+        self.read_collection = None
         self.write_db = None
         self.read_db = None
     
-    async def _get_collection(self):
-        if self.product_collection is None:
-            self.product_collection = await get_product_collection()
-            if self.product_collection is None:
-                raise Exception("MongoDB connection failed")
-        return self.product_collection
+    async def _get_write_collection(self):
+        if self.write_collection is None:
+            self.write_collection = await get_write_product_collection()
+            if self.write_collection is None:
+                raise Exception("MongoDB write connection failed")
+        return self.write_collection
+    
+    async def _get_read_collection(self):
+        if self.read_collection is None:
+            self.read_collection = await get_read_product_collection()
+            if self.read_collection is None:
+                raise Exception("MongoDB read connection failed")
+        return self.read_collection
     
     async def _get_write_db(self):
         if self.write_db is None:
@@ -52,7 +63,7 @@ class ProductService:
             if "stock" in product_dict:
                 del product_dict["stock"]
             
-            collection = await self._get_collection()
+            collection = await self._get_write_collection()  # Write collection 사용
             result = await collection.insert_one(product_dict)
             product_id = str(result.inserted_id)  # MongoDB가 생성한 _id를 사용
             
@@ -127,8 +138,8 @@ class ProductService:
             except Exception as es_error:
                 logger.warning(f"Product not found in Elasticsearch: {product_id}, error: {str(es_error)}")
             
-            # 2. Elasticsearch에 없는 경우 MongoDB에서 조회
-            collection = await self._get_collection()
+            # 2. Elasticsearch에 없는 경우 MongoDB에서 조회 (Read collection 사용)
+            collection = await self._get_read_collection()
             try:
                 product = await collection.find_one({"_id": ObjectId(product_id)})
             except:
@@ -242,7 +253,7 @@ class ProductService:
     async def update_product(self, product_id: str, product_update: ProductUpdate) -> Optional[ProductResponse]:
         """제품 업데이트"""
         try:
-            collection = await self._get_collection()
+            collection = await self._get_write_collection()  # Write collection 사용
             # 현재 제품 가져오기
             current_product = await collection.find_one({"_id": ObjectId(product_id)})
             if not current_product:
@@ -276,7 +287,7 @@ class ProductService:
     async def delete_product(self, product_id: str) -> bool:
         """제품 삭제"""
         try:
-            collection = await self._get_collection()
+            collection = await self._get_write_collection()  # Write collection 사용
             result = await collection.delete_one({"_id": ObjectId(product_id)})
             if result.deleted_count:
                 logger.info(f"Product deleted: {product_id}")
@@ -321,7 +332,7 @@ class ProductService:
                             "currency": variant.get("price", {}).get("currency", "USD")
                         },
                         "sku": variant.get("sku"),
-                        "storage": variant.get("storage")  # storage 필드가 없으면 None으로 설정
+                        "storage": variant.get("storage")
                     }
                     variants.append(variant_data)
                 
@@ -355,9 +366,9 @@ class ProductService:
             return products
         except Exception as e:
             logger.error(f"Error getting products from Elasticsearch: {str(e)}")
-            # Elasticsearch 실패 시 MongoDB로 폴백
+            # Elasticsearch 실패 시 MongoDB로 폴백 (Read collection 사용)
             try:
-                collection = await self._get_collection()
+                collection = await self._get_read_collection()
                 products = []
                 async for product in collection.find().skip(skip).limit(limit):
                     if "_id" in product:
@@ -376,7 +387,7 @@ class ProductService:
                                 "currency": variant.get("price", {}).get("currency", "USD")
                             },
                             "sku": variant.get("sku"),
-                            "storage": variant.get("storage")  # storage 필드가 없으면 None으로 설정
+                            "storage": variant.get("storage")
                         }
                         variants.append(variant_data)
                     
@@ -413,7 +424,7 @@ class ProductService:
     async def check_products_exist(self, product_ids: List[str]) -> ProductsExistResponse:
         """여러 제품의 존재 여부 확인"""
         try:
-            collection = await self._get_collection()
+            collection = await self._get_read_collection()  # Read collection 사용
             existing_products = []
             missing_products = []
             
@@ -578,7 +589,7 @@ class ProductService:
     async def get_product_mongodb_only(self, product_id: str) -> Optional[ProductResponse]:
         """MongoDB에서만 제품 ID로 제품 조회 (benchmark test용)"""
         try:
-            collection = await self._get_collection()
+            collection = await self._get_read_collection()  # Read collection 사용
             try:
                 product = await collection.find_one({"_id": ObjectId(product_id)})
             except:
