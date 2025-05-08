@@ -35,13 +35,238 @@ minikube tunnel
 minikube dashboard &
 ```
 
-## b. mysql에 replica set 설정 
+
+## b. mongodb에 replica set 설정 
+
+```bash
+# admin 데이터베이스로 첫번째 pod에 접속
+kubectl exec -it mongodb-stateful-0 -- mongosh -u $MONGO_INITDB_ROOT_USERNAME -p $MONGO_INITDB_ROOT_PASSWORD --authenticationDatabase admin
+
+# Replica Set 초기화
+# 안됬었는데 주소 바꾸고 재시도 해보자 
+rs.initiate({
+  _id: "rs0",
+  members: [
+    { _id: 0, host: "mongodb-stateful-0.mongodb-service.default.svc.cluster.local:27017" },
+    { _id: 1, host: "mongodb-stateful-1.mongodb-service.default.svc.cluster.local:27017" },
+    { _id: 2, host: "mongodb-stateful-2.mongodb-service.default.svc.cluster.local:27017" }
+  ]
+})
+
+# 노드 3개가 모두 추가되었고 ready 상태인지 확인한다. 
+rs.status()
+
+# 만약, 추가가 안됬다면, 수동으로 추가해준다.
+rs.add("mongodb-stateful-2.mongodb-service.default.svc.cluster.local:27017")
+```
+
+## c. mysql에 replica set 설정 
+
+### c-1. mysql과 mysql-shell이된 설치된 docker을 말아올리기 
+```bash
+cd mysql/
+
+docker buildx build --platform linux/arm64 -t doohwancho/mysql-custom:8.0.29 --push .
+```
+
+### c-2. mysql group replication setting (1 primary, 2 secondary)
+```bash
+kubectl apply -f k8_configs/mysql_depl_serv.yaml
+
+# mysql-0에 연결
+kubectl exec -it mysql-0 -- mysqlsh --uri root:root@mysql-0.mysql-headless:3306
+
+# InnoDB Cluster 구성 전 인스턴스 준비 확인
+\js
+dba.checkInstanceConfiguration('root@mysql-0.mysql-headless:3306', {password: 'root'});
+dba.checkInstanceConfiguration('root@mysql-1.mysql-headless:3306', {password: 'root'});
+dba.checkInstanceConfiguration('root@mysql-2.mysql-headless:3306', {password: 'root'});
+
+# 모든 인스턴스의 구성이 정상적으로 확인되면 클러스터를 생성합니다
+dba.configureInstance('root@mysql-0.mysql-headless:3306', {password: 'root'});
+dba.configureInstance('root@mysql-1.mysql-headless:3306', {password: 'root'});
+dba.configureInstance('root@mysql-2.mysql-headless:3306', {password: 'root'});
+
+# 클러스터 생성 (더 많은 옵션 지정)
+dba.dropMetadataSchema()
+
+# timeout 시간 늘리기 
+shell.options["dba.restartWaitTimeout"] = 180;  
+
+var cluster = dba.createCluster('MyCluster', {
+  multiPrimary: false,
+  force: true
+});
+
+엔터 엔터로 적용!
+
+# 다른 노드 추가 
+cluster.addInstance('root@mysql-1.mysql-headless:3306', {
+  password: 'root',
+  recoveryMethod: 'clone',
+  recoveryProgress: 1 
+});
+
+엔터 엔터로 적용!
+
+# 클러스터 상태 확인
+cluster.status();
+
+cluster.addInstance('root@mysql-2.mysql-headless:3306', {
+  password: 'root',
+  recoveryMethod: 'clone',
+  recoveryProgress: 1 
+});
+
+엔터 엔터로 적용!
+
+# 클러스터 상태 확인
+cluster.status();
+{
+    "clusterName": "MyCluster",
+    "defaultReplicaSet": {
+        "name": "default",
+        "primary": "mysql-0.mysql-headless:3306",
+        "ssl": "REQUIRED",
+        "status": "OK",
+        "statusText": "Cluster is ONLINE and can tolerate up to ONE failure.",
+        "topology": {
+            "mysql-0.mysql-headless:3306": {
+                "address": "mysql-0.mysql-headless:3306",
+                "memberRole": "PRIMARY",
+                "mode": "R/W",
+                "readReplicas": {},
+                "replicationLag": "applier_queue_applied",
+                "role": "HA",
+                "status": "ONLINE",
+                "version": "8.0.37"
+            },
+            "mysql-1.mysql-headless:3306": {
+                "address": "mysql-1.mysql-headless:3306",
+                "memberRole": "SECONDARY",
+                "mode": "R/O",
+                "readReplicas": {},
+                "replicationLag": "applier_queue_applied",
+                "role": "HA",
+                "status": "ONLINE",
+                "version": "8.0.37"
+            },
+            "mysql-2.mysql-headless:3306": {
+                "address": "mysql-2.mysql-headless:3306",
+                "memberRole": "SECONDARY",
+                "mode": "R/O",
+                "readReplicas": {},
+                "replicationLag": "applier_queue_applied",
+                "role": "HA",
+                "status": "ONLINE",
+                "version": "8.0.37"
+            }
+        },
+        "topologyMode": "Single-Primary"
+    },
+    "groupInformationSourceMember": "mysql-0.mysql-headless:3306"
+}
+
+# Q. 만약 status 봤는데 안붙어 있으면?
+cluster.rejoinInstance('root@mysql-1.mysql-headless:3306', {password: 'root'}); 
++---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST            | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
++---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| group_replication_applier | 42f772ed-2b12-11f0-9a4f-f612c78a06a3 | mysql-0.mysql-headless |        3306 | ONLINE       | PRIMARY     | 8.0.37         | MySQL                      |
+| group_replication_applier | 58a810af-2b12-11f0-b73f-369ce7864544 | mysql-1.mysql-headless |        3306 | ONLINE       | SECONDARY   | 8.0.37         | MySQL                      |
+| group_replication_applier | 6e9815f3-2b12-11f0-9945-3ed0f090e5de | mysql-2.mysql-headless |        3306 | ONLINE       | SECONDARY   | 8.0.37         | MySQL                      |
++---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
+
+cluster.rejoinInstance('root@mysql-2.mysql-headless:3306', {password: 'root'});
++---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST            | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
++---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| group_replication_applier | 42f772ed-2b12-11f0-9a4f-f612c78a06a3 | mysql-0.mysql-headless |        3306 | ONLINE       | PRIMARY     | 8.0.37         | MySQL                      |
+| group_replication_applier | 58a810af-2b12-11f0-b73f-369ce7864544 | mysql-1.mysql-headless |        3306 | ONLINE       | SECONDARY   | 8.0.37         | MySQL                      |
+| group_replication_applier | 6e9815f3-2b12-11f0-9945-3ed0f090e5de | mysql-2.mysql-headless |        3306 | ONLINE       | SECONDARY   | 8.0.37         | MySQL                      |
++---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
+
+
+# cluster가 잘 붙었는지 확인
+kubectl exec -it mysql-1 -- mysql -u root -proot -e "SELECT * FROM performance_schema.replication_group_members;"
+kubectl exec -it mysql-2 -- mysql -u root -proot -e "SELECT * FROM performance_schema.replication_group_members;" 
+```
+
+### c-3. mysql-router와 mysql-cluster 연결 확인 
+```bash
+# mysql-router와 mysql cluster를 붙이기 
+
+# 먼저 mysql-router 재시작
+kubectl rollout restart deployment mysql-router 
+
+# mysql-router 상태확인
+kubectl get pods | grep mysql-router
+
+
+# 연결 테스트
+
+# 읽기/쓰기 연결 테스트 (6446 포트, mysql-0(primary))
+# mysql-router 내부에서 6446(primary node의 port)로 연결 확인 
+kubectl exec -it mysql-router-688bc57bdb-cqcbq -- mysql -h 127.0.0.1 -P 6446 -u root -proot -e "SELECT @@hostname, @@port;"
++------------+--------+
+| @@hostname | @@port |
++------------+--------+
+| mysql-0    |   3306 |
++------------+--------+
+
+# 읽기 전용 연결 테스트 (6447 포트, mysql-1, mysql-2(secondary))
+# mysql-router 내부에서 6447(secondary node의 port)로 연결 확인 
+kubectl exec -it mysql-router-688bc57bdb-cqcbq -- mysql -h 127.0.0.1 -P 6447 -u root -proot -e "SELECT @@hostname, @@port;"
++------------+--------+
+| @@hostname | @@port |
++------------+--------+
+| mysql-1    |   3306 |
++------------+--------+
+```
+
+
+### c-4. 자동 fail over test 
+```bash
+kubectl get pod 
+
+# PRIMARY 노드(mysql-0) 중지 (이 명령어는 주의해서 사용하세요!)
+kubectl delete pod mysql-0 --grace-period=0 --force
+
+# 잠시 대기 후 연결 테스트
+kubectl exec -it mysql-1 -- mysql -u root -proot -e "SELECT * FROM performance_schema.replication_group_members;"
++---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST            | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
++---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| group_replication_applier | 58a810af-2b12-11f0-b73f-369ce7864544 | mysql-1.mysql-headless |        3306 | ONLINE       | PRIMARY     | 8.0.37         | MySQL                      |
+| group_replication_applier | 6e9815f3-2b12-11f0-9945-3ed0f090e5de | mysql-2.mysql-headless |        3306 | ONLINE       | SECONDARY   | 8.0.37         | MySQL                      |
++---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
+```
+mysql-1이 새로운 primary로 설정된걸 확인할 수 있다.
+
+
+
+
+### c-5. fastapi_module에서 mysql 연결할 때는?
+```bash
+# 읽기/쓰기 연결 (PRIMARY)
+jdbc:mysql://mysql-router:6446/your_database
+
+# 읽기 전용 연결 (SECONDARY)
+jdbc:mysql://mysql-router:6447/your_database
+```
+
+이러면 read replica에서도 부하분산 해준다.
+
+
+### c-번외, node가 2개(primary, secondary)인 경우 
 1. mysql-0 (primary, write)
 2. mysql-1 (secondary, read)
 
 이렇게 두개 생기는데(HA), write_db에 쓴다고 read_db에 sync가 안되기 때문에, 설정을 잡아줘야 sync 한다.
 
 ```bash
+kubectl apply -f ./k8_configs/mysql_depl_serv.yaml
+
 kubectl exec -it mysql-0 -- bash
 
 mysql -u root -p
@@ -93,29 +318,6 @@ START SLAVE;
 -- 복제 상태 확인
 SHOW SLAVE STATUS\G
 ```
-
-## c. mongodb에 replica set 설정 
-
-```bash
-# admin 데이터베이스로 첫번째 pod에 접속
-kubectl exec -it mongodb-stateful-0 -- mongosh -u $MONGO_INITDB_ROOT_USERNAME -p $MONGO_INITDB_ROOT_PASSWORD --authenticationDatabase admin
-
-# Replica Set 초기화
-# 안됬었는데 주소 바꾸고 재시도 해보자 
-rs.initiate({
-  _id: "rs0",
-  members: [
-    { _id: 0, host: "mongodb-stateful-0.mongodb-service.default.svc.cluster.local:27017" },
-    { _id: 1, host: "mongodb-stateful-1.mongodb-service.default.svc.cluster.local:27017" },
-    { _id: 2, host: "mongodb-stateful-2.mongodb-service.default.svc.cluster.local:27017" }
-  ]
-})
-
-rs.status()
-```
-
-
-
 
 ## c. test user module
 ```bash

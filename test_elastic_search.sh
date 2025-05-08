@@ -35,6 +35,7 @@ rs.initiate({
   members: [
     { _id: 0, host: "mongodb-stateful-0.mongodb-service.default.svc.cluster.local:27017" },
     { _id: 1, host: "mongodb-stateful-1.mongodb-service.default.svc.cluster.local:27017" }
+    { _id: 2, host: "mongodb-stateful-2.mongodb-service.default.svc.cluster.local:27017" }
   ]
 })'
 

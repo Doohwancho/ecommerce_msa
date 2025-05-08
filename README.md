@@ -1511,24 +1511,49 @@ index 만들 때 필터에서 생성한다.
 
 이 health check가 컨테이너 복구의 기반이 된다.
 
-### a-2. mysql HA 및 장애복구 시나리오
-primary(write) - secondary(read) replica set 구성.\
-secondary가 primary로부터 데이터를 복사한다.
-
-Q. Primary(mysql-0)에 장애가 발생하면?
-1. StatefulSet 컨트롤러가 자동으로 Pod를 재시작
-2. 데이터는 PersistentVolume에 저장되어 있으므로 손실되지 않음
-3. 재시작 동안 Secondary(mysql-1)에서 읽기 쿼리 처리 가능
-
-Q. Secondary(mysql-1)에 장애가 발생하면?
-- 자동으로 재시작되고 Primary에 다시 연결되어 복제 재개
-
-### a-3. mongodb HA 및 장애복구 시나리오
-- mongodb도 mysql처럼 primary(1 write db), secondary(2 read replica)로 나눠서, CRUD를 R / CUD 따로 처리한다.
-- 자동 fail over 복구는 node를 3개(1 write, 2 read)만들면 자동 처리 된다고 한다. 
+### a-2. mongodb HA 및 장애복구 시나리오
+- primary(1 write db), secondary(2 read replica)로 나눠서, CRUD를 R / CUD 따로 처리한다.
+- 자동 fail over 복구는 node를 3개(1 write, 2 read)만들면 자동 처리 된다고 한다.
 - Primary 노드가 실패하면 남은 Secondary 노드들이 자동으로 선거를 진행하여 새로운 Primary를 선출합니다. 이 과정은 일반적으로 몇 초 내에 완료된다.
 - 실패했던 노드가 다시 온라인 상태가 되면, 자동으로 replica set에 다시 합류하고 현재 Primary로부터 데이터를 동기화한 후 Secondary 역할을 다시 수행한다.
 - 중요한 것은 failover가 발생하려면 과반수(majority) 노드가 서로 통신할 수 있어야 합니다. 3개 노드인 경우 최소 2개 노드가 서로 통신할 수 있어야 선거가 진행된다. (이것이 바로 2개 노드만 있을 때 자동 failover가 불가능한 이유)
+
+
+#### Q. 쿼럼?
+쿼럼(과반수) 원칙: node가 죽어도 되는데, 어쨌든 살아있는 노드가 전체 노드 갯수의 절반+1(과반수) 이상이어야 한다.
+
+- 예를들어 원래 2개에서 1개 장애나서 1개만 남으면, 기존의 전체 노드 갯수(2)의 과반수 1개 이상이 아니기 때문에 과반수 투표 못함 -> 자동 fail over 장애 조치 못한다.
+- 근데 node 3개면, 1개 장애나도, 남은 2개가 기존 3개의 과반수 이상이기 때문에, 과반수 투표해서 primary / secondary 정해서 자동 fail over 장애 조치 된다.
+- node를 4개로 할 수도 있긴 한데, failover 관점에서는 약간 비효율이다.
+  - 1개 장애났을 때, 과반수 투표로 1개 primary, 2개 read replica로 설정할 수 있지만,
+  - 2개 장애났을 때, 과반수 투표를 못하기 때문에, node가 3개던 4개던, 장애 감당 가능한 노드 최대 갯수는 1개 뿐이다.
+  - 반면 node가 5개로 시작하면 2개까지 장애나도 3개가 남아 여전히 과반수 투표하여 자동 fail over 처리 가능하다.
+  - 따라서 장애 자동 처리 때문에 노드 갯수는 3,5,7 등 홀수개가 추천된다.
+
+mongodb를 예를 들면, `mongo-stateful-0`에서 replica set을 초기화 한 다음, 상태를 보면,
+```json
+rs0 [direct: primary] test> rs.status()
+{
+  set: 'rs0',
+  date: ISODate('2025-05-06T07:02:53.226Z'),
+  myState: 1,
+  term: Long('124'),
+  syncSourceHost: '',
+  syncSourceId: -1,
+  heartbeatIntervalMillis: Long('2000'),
+  majorityVoteCount: 2,
+  writeMajorityCount: 2,
+  votingMembersCount: 3,
+  writableVotingMembersCount: 3,
+  ...
+```
+총 노드가 2개니까, 과반수 2가 `majorityVoteCount`이고,\
+replica set에 노드가 3개 있으니까 `votingMembersCount`가 3인걸 확인할 수 있다.
+
+
+### a-3. mysql HA 및 장애복구 시나리오
+- mysql도 mongodb처럼 primary(write), secondary(read) 나눠서 CRUD중에 R는 read_db, CUD는 write_db에 물린다.
+- 과반수 원칙에 따라 노드 갯수는 3이상의 홀수개로 설정한다.
 
 
 ### a-4. elastic search HA 및 장애복구 시나리오

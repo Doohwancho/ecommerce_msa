@@ -16,22 +16,43 @@ data:
   primary.cnf: |
     [mysqld]
     server-id = 1
+    report_host = mysql-0.mysql-headless
     log_bin = mysql-bin
     binlog_format = ROW
     binlog_row_image = FULL
     binlog_expire_logs_seconds = 86400
     max_binlog_size = 100M
     default_authentication_plugin = mysql_native_password
+    binlog_transaction_dependency_tracking = WRITESET
+    enforce_gtid_consistency = ON
+    gtid_mode = ON
 
   secondary.cnf: |
     [mysqld]
     server-id = 2
+    report_host = mysql-1.mysql-headless
     log_bin = mysql-bin
     binlog_format = ROW
     binlog_row_image = FULL
     read_only = 1
     default_authentication_plugin = mysql_native_password
+    binlog_transaction_dependency_tracking = WRITESET
+    enforce_gtid_consistency = ON
+    gtid_mode = ON
     
+  tertiary.cnf: |   
+    [mysqld]
+    server-id = 3
+    report_host = mysql-2.mysql-headless
+    log_bin = mysql-bin
+    binlog_format = ROW
+    binlog_row_image = FULL
+    read_only = 1
+    default_authentication_plugin = mysql_native_password
+    binlog_transaction_dependency_tracking = WRITESET
+    enforce_gtid_consistency = ON
+    gtid_mode = ON
+
   init-secondary.sh: |
     #!/bin/bash
     
@@ -52,6 +73,21 @@ data:
     mysql -u root -p${MYSQL_ROOT_PASSWORD} -e "START SLAVE;"
     
     echo "Replication set up successfully."
+  
+  # MySQL Router 설정을 위한 스크립트 추가
+  bootstrap-router.sh: |   
+    #!/bin/bash
+    
+    echo "Waiting for MySQL cluster members to be ready..."
+    until mysql -h mysql-0.mysql-headless -u root -p${MYSQL_ROOT_PASSWORD} -e "SELECT 1"; do
+      sleep 5
+    done
+    
+    echo "Bootstrapping MySQL Router..."
+    mysqlrouter --bootstrap mysql-0.mysql-headless:3306 --user=root --password=${MYSQL_ROOT_PASSWORD} --force
+    
+    echo "Starting MySQL Router..."
+    mysqlrouter --config=/tmp/mysqlrouter/mysqlrouter.conf
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -62,7 +98,7 @@ spec:
     matchLabels:
       app: mysql
   serviceName: mysql-headless
-  replicas: 2
+  replicas: 3
   template:
     metadata:
       labels:
@@ -70,7 +106,8 @@ spec:
     spec:
       initContainers:
       - name: init-mysql
-        image: mysql:8.0.29
+        # image: mysql:8.0.8.0.29
+        image: doohwancho/mysql-custom:8.0.29
         command:
         - bash
         - "-c"
@@ -81,8 +118,10 @@ spec:
             ordinal=${BASH_REMATCH[1]}
             if [[ $ordinal -eq 0 ]]; then
               cp /mnt/config-map/primary.cnf /etc/mysql/conf.d/
-            else
+            elif [[ $ordinal -eq 1 ]]; then  
               cp /mnt/config-map/secondary.cnf /etc/mysql/conf.d/
+            else
+              cp /mnt/config-map/tertiary.cnf /etc/mysql/conf.d/  
             fi
           else
             echo "Failed to parse hostname: $HOSTNAME"
@@ -94,7 +133,8 @@ spec:
         - name: config-map
           mountPath: /mnt/config-map
       - name: clone-mysql
-        image: mysql:8.0.29
+        # image: mysql:8.0.8.0.29
+        image: doohwancho/mysql-custom:8.0.29
         command:
         - bash
         - "-c"
@@ -129,7 +169,8 @@ spec:
           mountPath: /mnt/config-map
       containers:
       - name: mysql
-        image: mysql:8.0.29
+        # image: mysql:8.0.29
+        image: doohwancho/mysql-custom:8.0.29
         env:
         - name: MYSQL_ROOT_PASSWORD
           valueFrom:
@@ -156,10 +197,10 @@ spec:
           mountPath: /etc/mysql/conf.d
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "100m"
-          limits:
             memory: "512Mi"
+            cpu: "200m"
+          limits:
+            memory: "1Gi"
             cpu: "500m"
         livenessProbe:
           exec:
@@ -189,6 +230,83 @@ spec:
       resources:
         requests:
           storage: 1Gi
+---
+apiVersion: apps/v1   
+kind: Deployment
+metadata:
+  name: mysql-router
+  labels:
+    app: mysql-router
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mysql-router
+  template:
+    metadata:
+      labels:
+        app: mysql-router
+    spec:
+      containers:
+      - name: mysql-router
+        image: mysql/mysql-router:8.0.29
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: mysql-root-password
+        ports:
+        - containerPort: 6446
+        - containerPort: 6447
+        command:
+        - /bin/bash
+        - "-c"
+        - |
+          echo "Waiting for MySQL cluster..."
+          until mysql -h mysql-0.mysql-headless -u root -proot -e "SELECT 1" > /dev/null 2>&1; do
+            echo "Waiting for MySQL to be available..."
+            sleep 5
+          done
+          
+          echo "Bootstrapping MySQL Router..."
+          mysqlrouter --bootstrap mysql-0.mysql-headless:3306 --user=root --password=root --directory=/tmp/mysqlrouter --force
+          
+          echo "Starting MySQL Router..."
+          mysqlrouter --config=/tmp/mysqlrouter/mysqlrouter.conf
+        livenessProbe:
+          tcpSocket:
+            port: 6446
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 6446
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+---
+# MySQL Router 서비스 추가
+apiVersion: v1   
+kind: Service
+metadata:
+  name: mysql-router
+spec:
+  selector:
+    app: mysql-router
+  ports:
+  - name: read-write
+    port: 6446
+    targetPort: 6446
+  - name: read-only
+    port: 6447
+    targetPort: 6447
 ---
 # Headless service for StatefulSet
 apiVersion: v1
@@ -227,6 +345,18 @@ spec:
   - port: 3306
     targetPort: 3306
 ---
+# Tertiary 서비스 (읽기 전용) - 새로 추가
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-tertiary
+spec:
+  selector:
+    statefulset.kubernetes.io/pod-name: mysql-2
+  ports:
+  - port: 3306
+    targetPort: 3306
+---
 # 기존 서비스 유지 (마이그레이션 호환성)
 apiVersion: v1
 kind: Service
@@ -238,96 +368,3 @@ spec:
   ports:
   - port: 3306
     targetPort: 3306
-
-# apiVersion: v1
-# kind: Secret
-# metadata:
-#   name: mysql-secret
-# type: Opaque
-# data:
-#   mysql-root-password: cm9vdA==  # root password of mysql in base64,  echo -n "root" | base64
-#   mysql-database: cHJvZHVjdF9jYXRlZ29yeQ==  # echo -n "product_category" | base64
-# ---
-# apiVersion: apps/v1
-# kind: Deployment
-# metadata:
-#   name: mysql-deployment
-# spec:
-#   replicas: 1
-#   selector:
-#     matchLabels:
-#       app: mysql
-#   template:
-#     metadata:
-#       labels:
-#         app: mysql
-#     spec:
-#       containers:
-#       - name: mysql
-#         image: mysql:8.0.29 # arm64 architecture compatible
-#         args:  
-#         - --character-set-server=utf8mb4
-#         - --collation-server=utf8mb4_unicode_ci
-#         ports:
-#         - containerPort: 3306
-#         env:
-#         - name: MYSQL_ROOT_PASSWORD
-#           valueFrom:
-#             secretKeyRef:
-#               name: mysql-secret
-#               key: mysql-root-password
-#         - name: MYSQL_DATABASE
-#           valueFrom:
-#             secretKeyRef:
-#               name: mysql-secret
-#               key: mysql-database
-#         resources:
-#           requests:
-#             memory: "256Mi"
-#             cpu: "100m"
-#           limits:
-#             memory: "512Mi"
-#             cpu: "500m"
-#         volumeMounts:
-#         - name: mysql-persistent-storage
-#           mountPath: /var/lib/mysql
-#       volumes:
-#       - name: mysql-persistent-storage
-#         persistentVolumeClaim:
-#           claimName: mysql-pv-claim
-# ---
-# apiVersion: v1
-# kind: PersistentVolumeClaim
-# metadata:
-#   name: mysql-pv-claim
-# spec:
-#   accessModes:
-#     - ReadWriteOnce
-#   resources:
-#     requests:
-#       storage: 1Gi
-# ---
-# apiVersion: v1
-# kind: Service
-# metadata:
-#   name: mysql-service
-# spec:
-#   selector:
-#     app: mysql
-#   ports:
-#   - protocol: TCP
-#     port: 3306
-#     targetPort: 3306
-# ---
-# apiVersion: v1
-# kind: ConfigMap
-# metadata:
-#   name: mysql-config
-# data:
-#   my.cnf: |
-#     [mysqld]
-#     server-id = 1
-#     log_bin = mysql-bin
-#     binlog_format = ROW
-#     binlog_row_image = FULL
-#     binlog_expire_logs_seconds = 86400

@@ -24,6 +24,7 @@ spec:
             - name: grpc
               containerPort: 50051
           env:
+            # mongodb   
             - name: MONGODB_HOST
               value: "mongodb-stateful-0.mongodb-service,mongodb-stateful-1.mongodb-service, mongodb-stateful-2.mongodb-service"
             - name: MONGODB_REPLICA_SET
@@ -40,10 +41,24 @@ spec:
                 secretKeyRef:
                   name: mongodb-secret
                   key: mongo-root-password
+            
+            # mysql 
+            # mysql router 
+            - name: MYSQL_ROUTER_HOST   
+              value: "mysql-router"
+            - name: MYSQL_ROUTER_RW_PORT  
+              value: "6446"              
+            - name: MYSQL_ROUTER_RO_PORT  
+              value: "6447"   
+
+            # mysql 3 nodes (optional, 이제 router로 통신한다)
             - name: MYSQL_PRIMARY_HOST
               value: "mysql-0.mysql-headless"
             - name: MYSQL_SECONDARY_HOST
               value: "mysql-1.mysql-headless"
+            - name: MYSQL_TERTIARY_HOST
+              value: "mysql-2.mysql-headless"
+
             - name: MYSQL_PORT
               value: "3306"
             - name: MYSQL_USER
@@ -60,6 +75,8 @@ spec:
                 secretKeyRef:
                   name: mysql-secret
                   key: mysql-database
+
+            # kafka  
             - name: KAFKA_BOOTSTRAP_SERVERS
               valueFrom:
                 configMapKeyRef:

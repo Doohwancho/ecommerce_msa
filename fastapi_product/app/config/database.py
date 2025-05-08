@@ -18,15 +18,21 @@ MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "root")
 # before replica set
 # MYSQL_HOST = os.getenv("MYSQL_HOST", "mysql-service")
 # after replica set
+# MySQL Router 
+MYSQL_ROUTER_HOST = os.getenv('MYSQL_ROUTER_HOST', 'mysql-router')
+MYSQL_ROUTER_RW_PORT = os.getenv('MYSQL_ROUTER_RW_PORT', '6446')
+MYSQL_ROUTER_RO_PORT = os.getenv('MYSQL_ROUTER_RO_PORT', '6447')
+
 MYSQL_PRIMARY_HOST = os.getenv('MYSQL_PRIMARY_HOST', 'mysql-0.mysql-headless')
 MYSQL_SECONDARY_HOST = os.getenv('MYSQL_SECONDARY_HOST', 'mysql-1.mysql-headless')
+MYSQL_TERTIARY_HOST = os.getenv('MYSQL_TERTIARY_HOST', 'mysql-2.mysql-headless')
 MYSQL_PORT = os.getenv('MYSQL_PORT', '3306')
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "product_category")
 # before replica set
 # SQLALCHEMY_DATABASE_URL = f"mysql+aiomysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}/{MYSQL_DATABASE}?charset=utf8mb4"
 # after replica set
 # 쓰기 작업용 엔진 (Primary)
-PRIMARY_URL = f"mysql+aiomysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_PRIMARY_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}"
+PRIMARY_URL = f"mysql+aiomysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_ROUTER_HOST}:{MYSQL_ROUTER_RW_PORT}/{MYSQL_DATABASE}"
 write_engine = create_async_engine(
     PRIMARY_URL,
     pool_pre_ping=True,
@@ -35,7 +41,7 @@ write_engine = create_async_engine(
 )
 
 # 읽기 작업용 엔진 (Secondary)
-SECONDARY_URL = f"mysql+aiomysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_SECONDARY_HOST}:{MYSQL_PORT}/{MYSQL_DATABASE}"
+SECONDARY_URL = f"mysql+aiomysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_ROUTER_HOST}:{MYSQL_ROUTER_RO_PORT}/{MYSQL_DATABASE}"
 read_engine = create_async_engine(
     SECONDARY_URL,
     pool_pre_ping=True,
