@@ -73,118 +73,76 @@ docker buildx build --platform linux/arm64 -t doohwancho/mysql-custom:8.0.29 --p
 ```bash
 kubectl apply -f k8_configs/mysql_depl_serv.yaml
 
-# mysql-0에 연결
-kubectl exec -it mysql-0 -- mysqlsh --uri root:root@mysql-0.mysql-headless:3306
+# 수동으로 mysql-0,1,2 실행시키고 group cluster 수동으로 만들고 join 시키기
+kubectl apply -f ./k8_configs/mysql_depl_serv.yaml
+# wait for mysql-0,1,2 to start
+kubectl exec -it mysql-0 -n default -- mysqlsh root@localhost:3306
+\sql
+SET GLOBAL group_replication_bootstrap_group=ON;
+START GROUP_REPLICATION;
+SET GLOBAL group_replication_bootstrap_group=OFF;
+-- 잘 됬는지 확인 (MEMBER_ROLE에 PRIMARY 있으면 된거)
+SELECT * FROM performance_schema.replication_group_members;
 
-# InnoDB Cluster 구성 전 인스턴스 준비 확인
-\js
-dba.checkInstanceConfiguration('root@mysql-0.mysql-headless:3306', {password: 'root'});
-dba.checkInstanceConfiguration('root@mysql-1.mysql-headless:3306', {password: 'root'});
-dba.checkInstanceConfiguration('root@mysql-2.mysql-headless:3306', {password: 'root'});
+# mysql-1,2 각자 접속해서 cluster에 join 시키기 
+kubectl exec -it mysql-1 -n default -- mysqlsh root@localhost:3306
+RESET MASTER;   # local GTID 이력 삭제 
+START GROUP_REPLICATION;
+SELECT * FROM performance_schema.replication_group_members;
 
-# 모든 인스턴스의 구성이 정상적으로 확인되면 클러스터를 생성합니다
-dba.configureInstance('root@mysql-0.mysql-headless:3306', {password: 'root'});
-dba.configureInstance('root@mysql-1.mysql-headless:3306', {password: 'root'});
-dba.configureInstance('root@mysql-2.mysql-headless:3306', {password: 'root'});
+kubectl exec -it mysql-2 -n default -- mysqlsh root@localhost:3306
+RESET MASTER;   # local GTID 이력 삭제 
+START GROUP_REPLICATION;
+SELECT * FROM performance_schema.replication_group_members;
+# 노드가 3개이고, 하나는 primary, 2개는 secondary임을 확인 
 
-# 클러스터 생성 (더 많은 옵션 지정)
-dba.dropMetadataSchema()
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST                                      | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| group_replication_applier | 271f6bbf-2e3a-11f0-9866-721273200872 | mysql-0.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | PRIMARY     | 8.0.37         | XCom                       |
+| group_replication_applier | 2848ce32-2e3a-11f0-91a5-e6cd9afb9529 | mysql-1.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
+| group_replication_applier | 2998cdfe-2e3a-11f0-a159-a679022f8238 | mysql-2.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
 
-# timeout 시간 늘리기 
-shell.options["dba.restartWaitTimeout"] = 180;  
+B. failover 테스트
+일부러 pod 하나 죽이기 죽이기 
+kubectl delete pod mysql-0 -n default
+kubectl exec -it mysql-1 -n default -- mysqlsh root@localhost:3306
+\sql
+SELECT * FROM performance_schema.replication_group_members;
 
-var cluster = dba.createCluster('MyCluster', {
-  multiPrimary: false,
-  force: true
-});
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST                                      | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| group_replication_applier | 271f6bbf-2e3a-11f0-9866-721273200872 | mysql-0.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
+| group_replication_applier | 2848ce32-2e3a-11f0-91a5-e6cd9afb9529 | mysql-1.mysql-headless.default.svc.cluster.local |        3306 | UNREACHABLE  | PRIMARY     | 8.0.37         | XCom                       |
+| group_replication_applier | 2998cdfe-2e3a-11f0-a159-a679022f8238 | mysql-2.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
 
-엔터 엔터로 적용!
+# 하나가 unreachable 상태임이 확인된다.
+# 좀 기다리다가 primary가 완전히 맛이 갔다고 판단되는 경우, 재투표해서 1 primary, 1 secondary가 된다.
 
-# 다른 노드 추가 
-cluster.addInstance('root@mysql-1.mysql-headless:3306', {
-  password: 'root',
-  recoveryMethod: 'clone',
-  recoveryProgress: 1 
-});
 
-엔터 엔터로 적용!
+C. 자동 recovery 확인 
+kubectl delete pod mysql-1 -n default
+# 하나 죽이면 unreachable 상태가 된다
+kubectl get pod
+# restart 한 후에
+kubectl exec -it mysql-0 -n default -- mysqlsh root@localhost:3306
+\sql
+SELECT * FROM performance_schema.replication_group_members;
 
-# 클러스터 상태 확인
-cluster.status();
+# cluster에 pod 3개, 1 primary, 2 secondary인지 확인 
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST                                      | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| group_replication_applier | 271f6bbf-2e3a-11f0-9866-721273200872 | mysql-0.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | PRIMARY     | 8.0.37         | XCom                       |
+| group_replication_applier | 2848ce32-2e3a-11f0-91a5-e6cd9afb9529 | mysql-1.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
+| group_replication_applier | 2998cdfe-2e3a-11f0-a159-a679022f8238 | mysql-2.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
 
-cluster.addInstance('root@mysql-2.mysql-headless:3306', {
-  password: 'root',
-  recoveryMethod: 'clone',
-  recoveryProgress: 1 
-});
-
-엔터 엔터로 적용!
-
-# 클러스터 상태 확인
-cluster.status();
-{
-    "clusterName": "MyCluster",
-    "defaultReplicaSet": {
-        "name": "default",
-        "primary": "mysql-0.mysql-headless:3306",
-        "ssl": "REQUIRED",
-        "status": "OK",
-        "statusText": "Cluster is ONLINE and can tolerate up to ONE failure.",
-        "topology": {
-            "mysql-0.mysql-headless:3306": {
-                "address": "mysql-0.mysql-headless:3306",
-                "memberRole": "PRIMARY",
-                "mode": "R/W",
-                "readReplicas": {},
-                "replicationLag": "applier_queue_applied",
-                "role": "HA",
-                "status": "ONLINE",
-                "version": "8.0.37"
-            },
-            "mysql-1.mysql-headless:3306": {
-                "address": "mysql-1.mysql-headless:3306",
-                "memberRole": "SECONDARY",
-                "mode": "R/O",
-                "readReplicas": {},
-                "replicationLag": "applier_queue_applied",
-                "role": "HA",
-                "status": "ONLINE",
-                "version": "8.0.37"
-            },
-            "mysql-2.mysql-headless:3306": {
-                "address": "mysql-2.mysql-headless:3306",
-                "memberRole": "SECONDARY",
-                "mode": "R/O",
-                "readReplicas": {},
-                "replicationLag": "applier_queue_applied",
-                "role": "HA",
-                "status": "ONLINE",
-                "version": "8.0.37"
-            }
-        },
-        "topologyMode": "Single-Primary"
-    },
-    "groupInformationSourceMember": "mysql-0.mysql-headless:3306"
-}
-
-# Q. 만약 status 봤는데 안붙어 있으면?
-cluster.rejoinInstance('root@mysql-1.mysql-headless:3306', {password: 'root'}); 
-+---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST            | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
-+---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| group_replication_applier | 42f772ed-2b12-11f0-9a4f-f612c78a06a3 | mysql-0.mysql-headless |        3306 | ONLINE       | PRIMARY     | 8.0.37         | MySQL                      |
-| group_replication_applier | 58a810af-2b12-11f0-b73f-369ce7864544 | mysql-1.mysql-headless |        3306 | ONLINE       | SECONDARY   | 8.0.37         | MySQL                      |
-| group_replication_applier | 6e9815f3-2b12-11f0-9945-3ed0f090e5de | mysql-2.mysql-headless |        3306 | ONLINE       | SECONDARY   | 8.0.37         | MySQL                      |
-+---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
-
-cluster.rejoinInstance('root@mysql-2.mysql-headless:3306', {password: 'root'});
-+---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST            | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
-+---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| group_replication_applier | 42f772ed-2b12-11f0-9a4f-f612c78a06a3 | mysql-0.mysql-headless |        3306 | ONLINE       | PRIMARY     | 8.0.37         | MySQL                      |
-| group_replication_applier | 58a810af-2b12-11f0-b73f-369ce7864544 | mysql-1.mysql-headless |        3306 | ONLINE       | SECONDARY   | 8.0.37         | MySQL                      |
-| group_replication_applier | 6e9815f3-2b12-11f0-9945-3ed0f090e5de | mysql-2.mysql-headless |        3306 | ONLINE       | SECONDARY   | 8.0.37         | MySQL                      |
-+---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
+# 1. UNREACHABLE -> ONLINE 복구되었고,
+# 2. primary를 죽이니까, 재투표로 기존에 secondary가 primary가 되고 재시작한 원래 primary가 secondary가 된걸 확인 
 
 
 # cluster가 잘 붙었는지 확인
@@ -223,6 +181,7 @@ kubectl exec -it mysql-router-688bc57bdb-cqcbq -- mysql -h 127.0.0.1 -P 6447 -u 
 | mysql-1    |   3306 |
 +------------+--------+
 ```
+
 
 
 ### c-4. 자동 fail over test 

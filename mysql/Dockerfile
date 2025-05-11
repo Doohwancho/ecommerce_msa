@@ -1,4 +1,5 @@
 # arm64 mysql:8.0.29에는 mysql-shell이 없음. 따라서 mysql-shell을 별도 설치한 커스텀 mysql을 사용한다.
+# 주의! 8.0.29를 깔았지만, mysql-shell을 깔 때 내부 업데이트 해줘야 해서 8.0.37 버전을 쓴다! 
 FROM mysql:8.0.29
 
 # 1. Add MySQL GPG key

@@ -1,370 +1,357 @@
+
 apiVersion: v1
 kind: Secret
 metadata:
   name: mysql-secret
 type: Opaque
 data:
-  mysql-root-password: cm9vdA==  # root
-  mysql-database: cHJvZHVjdF9jYXRlZ29yeQ==  # product_category
-  mysql-replication-password: cmVwbGljYXRpb24=  # replication
+  mysql-root-password: cm9vdA== # root
+  mysql-database: cHJvZHVjdF9jYXRlZ29yeQ== # product_category
+  mysql-replication-password: cmVwbGljYXRpb24= # replication
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mysql-config
 data:
-  primary.cnf: |
+  # Node 0 (Primary Candidate) Configuration Template
+  mysql-0.cnf.tpl: |
     [mysqld]
-    server-id = 1
-    report_host = mysql-0.mysql-headless
-    log_bin = mysql-bin
-    binlog_format = ROW
-    binlog_row_image = FULL
-    binlog_expire_logs_seconds = 86400
-    max_binlog_size = 100M
-    default_authentication_plugin = mysql_native_password
-    binlog_transaction_dependency_tracking = WRITESET
-    enforce_gtid_consistency = ON
-    gtid_mode = ON
+    server-id=1
+    report_host=mysql-0.mysql-headless.default.svc.cluster.local 
+    relay_log=mysql-0-relay-bin
 
-  secondary.cnf: |
-    [mysqld]
-    server-id = 2
-    report_host = mysql-1.mysql-headless
-    log_bin = mysql-bin
-    binlog_format = ROW
-    binlog_row_image = FULL
-    read_only = 1
-    default_authentication_plugin = mysql_native_password
-    binlog_transaction_dependency_tracking = WRITESET
-    enforce_gtid_consistency = ON
-    gtid_mode = ON
-    
-  tertiary.cnf: |   
-    [mysqld]
-    server-id = 3
-    report_host = mysql-2.mysql-headless
-    log_bin = mysql-bin
-    binlog_format = ROW
-    binlog_row_image = FULL
-    read_only = 1
-    default_authentication_plugin = mysql_native_password
-    binlog_transaction_dependency_tracking = WRITESET
-    enforce_gtid_consistency = ON
-    gtid_mode = ON
+    # Common MGR Settings (from Chinese example)
+    plugin_load_add='group_replication.so'
+    gtid_mode=ON
+    enforce_gtid_consistency=ON
+    log_bin=binlog
+    binlog_format=ROW
+    binlog_checksum=NONE
+    log_slave_updates=1
+    master_info_repository=TABLE
+    relay_log_info_repository=TABLE
+    transaction_write_set_extraction=XXHASH64
+    character_set_server=utf8mb4
+    default_authentication_plugin=mysql_native_password
+    skip-name-resolve # 중국어 예제에 있었음. GR에서는 FQDN 사용 권장되기도 함. 사용시 GRANT 구문에 IP 사용 필요.
+    default-time-zone = '+8:00'
+    log_timestamps = SYSTEM
+    auto-increment-increment=2 # 싱글 프라이머리에서는 auto-increment-offset은 보통 1로 고정
+    auto-increment-offset=1
+    max_allowed_packet = 500M
+    secure_file_priv=''
 
-  init-secondary.sh: |
+    # MGR Specific
+    loose-group_replication_group_name="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    loose-group_replication_start_on_boot=OFF
+    loose-group_replication_bootstrap_group=OFF
+    loose-group_replication_local_address="__POD_IP_PLACEHOLDER__:33061"
+    loose-group_replication_group_seeds="mysql-0.mysql-headless.default.svc.cluster.local:33061,mysql-1.mysql-headless.default.svc.cluster.local:33062,mysql-2.mysql-headless.default.svc.cluster.local:33063" 
+    loose-group_replication_ip_whitelist="10.244.0.0/16,172.17.0.0/16,127.0.0.1" # K8s Pod CIDR, Docker Bridge, Localhost (환경에 맞게 수정)
+    report_port=3306
+
+  # Node 1 (Secondary Candidate) Configuration Template
+  mysql-1.cnf.tpl: |
+    [mysqld]
+    server-id=2
+    report_host=mysql-1.mysql-headless.default.svc.cluster.local 
+    relay_log=mysql-1-relay-bin
+
+    # Common MGR Settings (from Chinese example) - 동일하게 적용
+    plugin_load_add='group_replication.so'
+    gtid_mode=ON
+    enforce_gtid_consistency=ON
+    log_bin=binlog
+    binlog_format=ROW
+    binlog_checksum=NONE
+    log_slave_updates=1
+    master_info_repository=TABLE
+    relay_log_info_repository=TABLE
+    transaction_write_set_extraction=XXHASH64
+    character_set_server=utf8mb4
+    default_authentication_plugin=mysql_native_password
+    skip-name-resolve
+    default-time-zone = '+8:00'
+    log_timestamps = SYSTEM
+    auto-increment-increment=2
+    auto-increment-offset=1 # 싱글 프라이머리 모드에서 세컨더리는 offset이 달라도 보통 쓰기 안 함
+    max_allowed_packet = 500M
+    secure_file_priv=''
+
+    # MGR Specific
+    loose-group_replication_group_name="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    loose-group_replication_start_on_boot=OFF
+    loose-group_replication_bootstrap_group=OFF
+    loose-group_replication_local_address="__POD_IP_PLACEHOLDER__:33062"
+    loose-group_replication_group_seeds="mysql-0.mysql-headless.default.svc.cluster.local:33061,mysql-1.mysql-headless.default.svc.cluster.local:33062,mysql-2.mysql-headless.default.svc.cluster.local:33063" 
+    loose-group_replication_ip_whitelist="10.244.0.0/16,172.17.0.0/16,127.0.0.1" # K8s Pod CIDR, Docker Bridge, Localhost (환경에 맞게 수정)
+    report_port=3306
+
+  # Node 2 (Secondary Candidate) Configuration Template
+  mysql-2.cnf.tpl: |
+    [mysqld]
+    server-id=3
+    report_host=mysql-2.mysql-headless.default.svc.cluster.local 
+    relay_log=mysql-2-relay-bin
+
+    # Common MGR Settings (from Chinese example) - 동일하게 적용
+    plugin_load_add='group_replication.so'
+    gtid_mode=ON
+    enforce_gtid_consistency=ON
+    log_bin=binlog
+    binlog_format=ROW
+    binlog_checksum=NONE
+    log_slave_updates=1
+    master_info_repository=TABLE
+    relay_log_info_repository=TABLE
+    transaction_write_set_extraction=XXHASH64
+    character_set_server=utf8mb4
+    default_authentication_plugin=mysql_native_password
+    skip-name-resolve
+    default-time-zone = '+8:00'
+    log_timestamps = SYSTEM
+    auto-increment-increment=2
+    auto-increment-offset=1
+    max_allowed_packet = 500M
+    secure_file_priv=''
+
+    # MGR Specific
+    loose-group_replication_group_name="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    loose-group_replication_start_on_boot=OFF
+    loose-group_replication_bootstrap_group=OFF
+    loose-group_replication_local_address="__POD_IP_PLACEHOLDER__:33063"
+    loose-group_replication_group_seeds="mysql-0.mysql-headless.default.svc.cluster.local:33061,mysql-1.mysql-headless.default.svc.cluster.local:33062,mysql-2.mysql-headless.default.svc.cluster.local:33063" 
+    loose-group_replication_ip_whitelist="10.244.0.0/16,172.17.0.0/16,127.0.0.1" # K8s Pod CIDR, Docker Bridge, Localhost (환경에 맞게 수정)
+    report_port=3306
+
+  entrypoint-wrapper.sh: |
     #!/bin/bash
-    
-    echo "Waiting for primary to be ready..."
-    until mysql -h mysql-0.mysql-headless -u root -p${MYSQL_ROOT_PASSWORD} -e "SELECT 1"; do
-      sleep 5
+    set -eo pipefail # pipefail은 파이프 중간에 에러나도 감지
+
+    echo "Wrapper script started for ${HOSTNAME} with IP ${POD_IP}"
+
+    # /mnt/config-templates에서 복사된 설정 파일 경로 (initContainer가 처리)
+    # initContainer가 /mnt/mysql-conf/my.cnf 에 최종 cnf 파일을 준비한다고 가정
+    # 이 스크립트는 해당 my.cnf를 MySQL이 인식하도록 /etc/mysql/my.cnf 또는 /etc/mysql/conf.d/zz-mgr.cnf 등으로 링크/복사 할 수 있음
+    # MySQL 공식 이미지는 /etc/mysql/conf.d/ 를 읽으므로, initContainer가 여기에 파일을 직접 생성하는 것이 좋음
+
+    # 원본 Docker 엔트리포인트 실행 (백그라운드로)
+    # docker-entrypoint.sh 스크립트는 MYSQL_ROOT_PASSWORD 등의 환경 변수를 사용하여 초기 설정을 수행함
+    echo "Starting MySQL server via original entrypoint in background..."
+    /usr/local/bin/docker-entrypoint.sh mysqld &
+    MYSQLD_PID=$!
+
+    echo "Waiting for MySQL (${HOSTNAME}) to be ready (ping)..."
+    # MYSQL_ROOT_PASSWORD는 Secret에서 환경변수로 주입됨
+    until mysqladmin ping -h 127.0.0.1 -u root -p"${MYSQL_ROOT_PASSWORD}" --silent; do
+        if ! kill -0 $MYSQLD_PID 2>/dev/null; then
+            echo "MySQL server failed to start during ping check on ${HOSTNAME}."
+            exit 1
+        fi
+        echo "MySQL on ${HOSTNAME} not ready yet, sleeping..."
+        sleep 2
     done
-    
-    echo "Setting up replication from primary..."
-    
-    # Get binary log file and position from primary
-    MASTER_STATUS=$(mysql -h mysql-0.mysql-headless -u root -p${MYSQL_ROOT_PASSWORD} -e "SHOW MASTER STATUS\G")
-    BINLOG_FILE=$(echo "$MASTER_STATUS" | grep File | awk '{print $2}')
-    BINLOG_POS=$(echo "$MASTER_STATUS" | grep Position | awk '{print $2}')
-    
-    # Set up replication
-    mysql -u root -p${MYSQL_ROOT_PASSWORD} -e "CHANGE MASTER TO MASTER_HOST='mysql-0.mysql-headless', MASTER_USER='replication', MASTER_PASSWORD='${MYSQL_REPLICATION_PASSWORD}', MASTER_LOG_FILE='$BINLOG_FILE', MASTER_LOG_POS=$BINLOG_POS;"
-    mysql -u root -p${MYSQL_ROOT_PASSWORD} -e "START SLAVE;"
-    
-    echo "Replication set up successfully."
-  
-  # MySQL Router 설정을 위한 스크립트 추가
-  bootstrap-router.sh: |   
-    #!/bin/bash
-    
-    echo "Waiting for MySQL cluster members to be ready..."
-    until mysql -h mysql-0.mysql-headless -u root -p${MYSQL_ROOT_PASSWORD} -e "SELECT 1"; do
-      sleep 5
-    done
-    
-    echo "Bootstrapping MySQL Router..."
-    mysqlrouter --bootstrap mysql-0.mysql-headless:3306 --user=root --password=${MYSQL_ROOT_PASSWORD} --force
-    
-    echo "Starting MySQL Router..."
-    mysqlrouter --config=/tmp/mysqlrouter/mysqlrouter.conf
+    echo "MySQL on ${HOSTNAME} is ready."
+
+    echo "Running MGR setup SQL commands on ${HOSTNAME}..."
+    # Group Replication 플러그인 설치 (멱등성을 위해 오류 무시 가능)
+    mysql -h 127.0.0.1 -u root -p"${MYSQL_ROOT_PASSWORD}" -e "INSTALL PLUGIN group_replication SONAME 'group_replication.so';" || echo "Plugin already installed or error during install on ${HOSTNAME} (ignored)."
+
+    # Group Replication 복구용 유저 생성 및 권한 설정 (멱등성 고려)
+    # MYSQL_REPLICATION_PASSWORD는 Secret에서 환경변수로 주입됨
+    mysql -h 127.0.0.1 -u root -p"${MYSQL_ROOT_PASSWORD}" <<EOF
+    SET SQL_LOG_BIN=0;
+    CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED BY '${MYSQL_REPLICATION_PASSWORD}';
+    GRANT REPLICATION SLAVE ON *.* TO 'repl'@'%';
+    GRANT GROUP_REPLICATION_ADMIN ON *.* TO 'repl'@'%'; # AdminAPI 사용 또는 직접 MGR 제어 시 필요할 수 있음
+    GRANT CLONE_ADMIN ON *.* TO 'repl'@'%'; # MySQL 8.0.17+ Clone 기능 사용 시
+    FLUSH PRIVILEGES;
+    SET SQL_LOG_BIN=1;
+    CHANGE MASTER TO MASTER_USER='repl', MASTER_PASSWORD='${MYSQL_REPLICATION_PASSWORD}' FOR CHANNEL 'group_replication_recovery';
+    EOF
+    echo "MGR recovery user setup complete on ${HOSTNAME}."
+
+    echo "Attempting to start Group Replication on ${HOSTNAME}..."
+    # 사용자가 수동으로 클러스터를 구성하므로, 이 단계에서는 시작만 시도함.
+    # 초기 부트스트랩 전에는 실패할 수 있음. 재시작 시에는 자동 재참여 시도.
+    mysql -h 127.0.0.1 -u root -p"${MYSQL_ROOT_PASSWORD}" -e "START GROUP_REPLICATION;" || echo "START GROUP_REPLICATION failed or node already in group on ${HOSTNAME}. This might be expected on initial boot or for rejoining nodes."
+    echo "MGR startup attempt complete on ${HOSTNAME}."
+
+    # mysqld 프로세스가 종료될 때까지 대기 (컨테이너가 계속 실행되도록)
+    echo "Wrapper script for ${HOSTNAME} is now waiting for mysqld process (PID: ${MYSQLD_PID})."
+    wait $MYSQLD_PID
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: mysql
+  labels:
+    app: mysql-mgr
 spec:
   selector:
     matchLabels:
-      app: mysql
-  serviceName: mysql-headless
+      app: mysql-mgr
+  serviceName: mysql-headless # 이 서비스는 아래에 정의됨
   replicas: 3
+  podManagementPolicy: Parallel # 파드들이 병렬로 생성 및 초기화되도록 함
   template:
     metadata:
       labels:
-        app: mysql
+        app: mysql-mgr
     spec:
       initContainers:
-      - name: init-mysql
-        # image: mysql:8.0.8.0.29
-        image: doohwancho/mysql-custom:8.0.29
-        command:
-        - bash
-        - "-c"
+      - name: init-config
+        image: busybox:latest # 작은 이미지 사용
+        command: ["/bin/sh", "-c"]
+        args:
         - |
-          set -ex
-          # MySQL 설정 파일 복사
-          if [[ $HOSTNAME =~ -([0-9]+)$ ]]; then
-            ordinal=${BASH_REMATCH[1]}
-            if [[ $ordinal -eq 0 ]]; then
-              cp /mnt/config-map/primary.cnf /etc/mysql/conf.d/
-            elif [[ $ordinal -eq 1 ]]; then  
-              cp /mnt/config-map/secondary.cnf /etc/mysql/conf.d/
-            else
-              cp /mnt/config-map/tertiary.cnf /etc/mysql/conf.d/  
-            fi
-          else
-            echo "Failed to parse hostname: $HOSTNAME"
-            exit 1
+          set -ex;
+          ORDINAL="${HOSTNAME##*-}"; # mysql-0 -> 0, mysql-1 -> 1
+          CONFIG_TEMPLATE_FILE="/mnt/config-templates/mysql-${ORDINAL}.cnf.tpl";
+          FINAL_CONFIG_DIR="/mnt/mysql-conf"; # MySQL 컨테이너와 공유할 볼륨
+          FINAL_CONFIG_FILE="${FINAL_CONFIG_DIR}/zz-group-replication.cnf"; # zz- prefix로 나중에 로드되도록
+
+          mkdir -p ${FINAL_CONFIG_DIR};
+
+          if [ ! -f "$CONFIG_TEMPLATE_FILE" ]; then
+            echo "Error: Config template $CONFIG_TEMPLATE_FILE not found!" >&2;
+            exit 1;
           fi
+          
+          # POD_IP를 사용하여 __POD_IP_PLACEHOLDER__를 실제 IP로 치환
+          # sed는 작은 따옴표 안에서 변수 확장이 안되므로 큰 따옴표 사용 또는 외부에서 변수 전달
+          # 아래는 예시이며, 실제 sed 사용 시에는 escaping 주의
+          echo "Preparing config for ${HOSTNAME} with POD_IP ${POD_IP}"
+          sed "s/__POD_IP_PLACEHOLDER__/${POD_IP}/g" "$CONFIG_TEMPLATE_FILE" > "$FINAL_CONFIG_FILE"
+          
+          echo "Config file ${FINAL_CONFIG_FILE} prepared for ${HOSTNAME}:"
+          cat ${FINAL_CONFIG_FILE}
+        env:
+        - name: POD_IP # Downward API를 통해 Pod IP 주입
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
         volumeMounts:
-        - name: conf
-          mountPath: /etc/mysql/conf.d
-        - name: config-map
-          mountPath: /mnt/config-map
-      - name: clone-mysql
-        # image: mysql:8.0.8.0.29
-        image: doohwancho/mysql-custom:8.0.29
-        command:
-        - bash
-        - "-c"
-        - |
-          set -ex
-          # Secondary (replica) 초기화
-          if [[ $HOSTNAME =~ -([0-9]+)$ ]]; then
-            ordinal=${BASH_REMATCH[1]}
-            if [[ $ordinal -gt 0 ]]; then
-              # Secondary는 Primary(mysql-0)에서 초기 데이터 복제
-              if [[ ! -d /var/lib/mysql/mysql ]]; then
-                # 복제 사용자 생성(mysql-0에서)
-                /mnt/config-map/init-secondary.sh &
-              fi
-            fi
-          fi
+        - name: config-templates
+          mountPath: /mnt/config-templates
+        - name: mysql-conf # 메인 컨테이너와 공유할 설정 파일 저장용 볼륨
+          mountPath: /mnt/mysql-conf
+
+      containers:
+      - name: mysql
+        image: doohwancho/mysql-custom:8.0.29 # 사용자 정의 이미지
+        command: ["/mnt/scripts/entrypoint-wrapper.sh"] # ConfigMap에 정의된 스크립트 실행
         env:
         - name: MYSQL_ROOT_PASSWORD
           valueFrom:
             secretKeyRef:
               name: mysql-secret
               key: mysql-root-password
-        - name: MYSQL_REPLICATION_PASSWORD
+        - name: MYSQL_REPLICATION_PASSWORD # 스크립트에서 사용
           valueFrom:
             secretKeyRef:
               name: mysql-secret
               key: mysql-replication-password
-        volumeMounts:
-        - name: data
-          mountPath: /var/lib/mysql
-        - name: config-map
-          mountPath: /mnt/config-map
-      containers:
-      - name: mysql
-        # image: mysql:8.0.29
-        image: doohwancho/mysql-custom:8.0.29
-        env:
-        - name: MYSQL_ROOT_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: mysql-secret
-              key: mysql-root-password
-        - name: MYSQL_DATABASE
+        - name: MYSQL_DATABASE # docker-entrypoint.sh가 사용할 수 있음
           valueFrom:
             secretKeyRef:
               name: mysql-secret
               key: mysql-database
-        - name: MYSQL_REPLICATION_PASSWORD
+        - name: POD_IP # Downward API (initContainer와 동일하게)
           valueFrom:
-            secretKeyRef:
-              name: mysql-secret
-              key: mysql-replication-password
+            fieldRef:
+              fieldPath: status.podIP
+        - name: MY_NAMESPACE # Downward API ( 스크립트 또는 cnf 내 FQDN 구성 시 사용 가능)
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         ports:
         - name: mysql
           containerPort: 3306
+        - name: mysql-mgr1 # MGR 통신 포트 (mysql-0 용)
+          containerPort: 33061
+        - name: mysql-mgr2 # MGR 통신 포트 (mysql-1 용)
+          containerPort: 33062
+        - name: mysql-mgr3 # MGR 통신 포트 (mysql-2 용)
+          containerPort: 33063
         volumeMounts:
-        - name: data
+        - name: data # 영구 데이터 저장용
           mountPath: /var/lib/mysql
-        - name: conf
-          mountPath: /etc/mysql/conf.d
-        resources:
-          requests:
-            memory: "512Mi"
-            cpu: "200m"
-          limits:
-            memory: "1Gi"
-            cpu: "500m"
+        - name: mysql-conf # initContainer가 준비한 설정 파일 마운트
+          mountPath: /etc/mysql/conf.d # MySQL이 읽는 최종 설정 디렉토리
+        - name: scripts # 실행 스크립트 마운트
+          mountPath: /mnt/scripts
+        # Liveness & Readiness Probes (필수)
         livenessProbe:
           exec:
-            command: ["mysqladmin", "ping", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
-          initialDelaySeconds: 30
+            command: ["mysqladmin", "ping", "-h127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+          initialDelaySeconds: 45
           periodSeconds: 10
           timeoutSeconds: 5
         readinessProbe:
           exec:
-            # command: ["mysql", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}", "-e", "SELECT 1"]
-            command: ["sh", "-c", "mysql -u root -proot -e 'SELECT 1'"]
-          initialDelaySeconds: 30
-          periodSeconds: 5
-          timeoutSeconds: 3
+            command: ["mysqladmin", "ping", "-h127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+          initialDelaySeconds: 120
+          periodSeconds: 15
+          failureThreshold: 5
+        # readinessProbe:
+        #   exec:
+        #     # Group Replication 멤버 상태까지 확인하려면 더 복잡한 스크립트 필요
+        #     # 여기서는 기본 연결 및 MGR 플러그인 로드 상태 정도만 확인 가능
+        #     command: ["mysql", "-h127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}", "-e", "SELECT 1; SHOW PLUGINS LIKE 'group_replication';"]
+        #   initialDelaySeconds: 90
+        #   periodSeconds: 10
+        #   timeoutSeconds: 5
       volumes:
-      - name: config-map
+      - name: config-templates # ConfigMap의 .cnf.tpl 파일들
         configMap:
           name: mysql-config
-          defaultMode: 0755
-      - name: conf
+          items:
+            - key: mysql-0.cnf.tpl
+              path: mysql-0.cnf.tpl
+            - key: mysql-1.cnf.tpl
+              path: mysql-1.cnf.tpl
+            - key: mysql-2.cnf.tpl
+              path: mysql-2.cnf.tpl
+      - name: scripts # ConfigMap의 실행 스크립트
+        configMap:
+          name: mysql-config
+          items:
+            - key: entrypoint-wrapper.sh
+              path: entrypoint-wrapper.sh
+              mode: 0755 # 실행 권한 부여
+      - name: mysql-conf # initContainer와 메인 컨테이너가 공유 (설정파일 전달용)
         emptyDir: {}
-  volumeClaimTemplates:
+  volumeClaimTemplates: # 영구 스토리지 요청
   - metadata:
       name: data
     spec:
-      accessModes: ["ReadWriteOnce"]
+      accessModes: ["ReadWriteOnce"] # 일반적인 PV 접근 모드
       resources:
         requests:
-          storage: 1Gi
+          storage: 10Gi # 필요에 따라 스토리지 크기 조절
 ---
-apiVersion: apps/v1   
-kind: Deployment
-metadata:
-  name: mysql-router
-  labels:
-    app: mysql-router
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: mysql-router
-  template:
-    metadata:
-      labels:
-        app: mysql-router
-    spec:
-      containers:
-      - name: mysql-router
-        image: mysql/mysql-router:8.0.29
-        env:
-        - name: MYSQL_ROOT_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: mysql-secret
-              key: mysql-root-password
-        ports:
-        - containerPort: 6446
-        - containerPort: 6447
-        command:
-        - /bin/bash
-        - "-c"
-        - |
-          echo "Waiting for MySQL cluster..."
-          until mysql -h mysql-0.mysql-headless -u root -proot -e "SELECT 1" > /dev/null 2>&1; do
-            echo "Waiting for MySQL to be available..."
-            sleep 5
-          done
-          
-          echo "Bootstrapping MySQL Router..."
-          mysqlrouter --bootstrap mysql-0.mysql-headless:3306 --user=root --password=root --directory=/tmp/mysqlrouter --force
-          
-          echo "Starting MySQL Router..."
-          mysqlrouter --config=/tmp/mysqlrouter/mysqlrouter.conf
-        livenessProbe:
-          tcpSocket:
-            port: 6446
-          initialDelaySeconds: 30
-          periodSeconds: 10
-        readinessProbe:
-          tcpSocket:
-            port: 6446
-          initialDelaySeconds: 5
-          periodSeconds: 10
-        resources:
-          limits:
-            memory: "256Mi"
-            cpu: "200m"
-          requests:
-            memory: "128Mi"
-            cpu: "100m"
----
-# MySQL Router 서비스 추가
-apiVersion: v1   
-kind: Service
-metadata:
-  name: mysql-router
-spec:
-  selector:
-    app: mysql-router
-  ports:
-  - name: read-write
-    port: 6446
-    targetPort: 6446
-  - name: read-only
-    port: 6447
-    targetPort: 6447
----
-# Headless service for StatefulSet
 apiVersion: v1
 kind: Service
 metadata:
-  name: mysql-headless
+  name: mysql-headless # StatefulSet 파드들이 고유 DNS 이름을 갖도록 하는 서비스
 spec:
-  clusterIP: None
+  clusterIP: None # Headless 서비스는 ClusterIP가 없음
   selector:
-    app: mysql
+    app: mysql-mgr
   ports:
-  - port: 3306
+  - name: mysql
+    port: 3306
     targetPort: 3306
----
-# Primary 서비스 (읽기/쓰기)
-apiVersion: v1
-kind: Service
-metadata:
-  name: mysql-primary
-spec:
-  selector:
-    statefulset.kubernetes.io/pod-name: mysql-0
-  ports:
-  - port: 3306
-    targetPort: 3306
----
-# Secondary 서비스 (읽기 전용)
-apiVersion: v1
-kind: Service
-metadata:
-  name: mysql-secondary
-spec:
-  selector:
-    statefulset.kubernetes.io/pod-name: mysql-1
-  ports:
-  - port: 3306
-    targetPort: 3306
----
-# Tertiary 서비스 (읽기 전용) - 새로 추가
-apiVersion: v1
-kind: Service
-metadata:
-  name: mysql-tertiary
-spec:
-  selector:
-    statefulset.kubernetes.io/pod-name: mysql-2
-  ports:
-  - port: 3306
-    targetPort: 3306
----
-# 기존 서비스 유지 (마이그레이션 호환성)
-apiVersion: v1
-kind: Service
-metadata:
-  name: mysql-service
-spec:
-  selector:
-    statefulset.kubernetes.io/pod-name: mysql-0
-  ports:
-  - port: 3306
-    targetPort: 3306
+  # MGR 통신 포트들도 서비스에 노출 가능 (선택 사항)
+  - name: mysql-mgr1
+    port: 33061
+    targetPort: 33061
+  - name: mysql-mgr2
+    port: 33062
+    targetPort: 33062
+  - name: mysql-mgr3
+    port: 33063
+    targetPort: 33063
+
