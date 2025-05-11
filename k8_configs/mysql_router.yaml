@@ -1,0 +1,123 @@
+# ======================================================================
+# MySQL Router Deployment
+# ======================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql-router
+  namespace: default # 여기에 실제 네임스페이스를 적어주세요 (예: default)
+  labels:
+    app: mysql-router-mgr # 다른 Router와 구분하기 위한 레이블
+spec:
+  replicas: 2 # Router 자체의 HA를 위해 2개 이상 권장
+  selector:
+    matchLabels:
+      app: mysql-router-mgr
+  template:
+    metadata:
+      labels:
+        app: mysql-router-mgr
+    spec:
+      containers:
+      - name: mysql-router
+        # image: mysql/mysql-router:8.0.37 # MySQL 서버 버전과 유사하게 맞춰주세요
+        image: mysql/mysql-router:latest # MySQL 서버 버전과 유사하게 맞춰주세요
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret # 기존 MGR 클러스터에서 사용하는 Secret
+              key: mysql-root-password
+        - name: MYSQL_CONNECT_NODE # Router가 부트스트랩할 때 연결할 MySQL 노드 주소
+          value: "mysql-0.mysql-headless.default.svc.cluster.local" 
+        ports:
+        - name: mysql-rw # Read-Write (Classic Protocol)
+          containerPort: 6446
+        - name: mysql-ro # Read-Only (Classic Protocol)
+          containerPort: 6447
+        # - name: mysqlx-rw # Read-Write (X Protocol)
+        #   containerPort: 6448
+        # - name: mysqlx-ro # Read-Only (X Protocol)
+        #   containerPort: 6449
+        command:
+        - /bin/bash
+        - "-c"
+        - |
+          set -eo pipefail
+          echo "MySQL Router starting for Group Replication cluster..."
+          echo "Target MySQL node for bootstrap: ${MYSQL_CONNECT_NODE}"
+          
+          echo "Waiting for MySQL node ${MYSQL_CONNECT_NODE} to be available..."
+          # mysqladmin ping을 사용하여 MySQL 서버가 연결 가능한지 확인
+          # MYSQL_ROOT_PASSWORD 환경 변수가 여기서 사용됨
+          until mysqladmin ping -h "${MYSQL_CONNECT_NODE}" -u root -p"${MYSQL_ROOT_PASSWORD}" --silent; do
+            echo "MySQL node ${MYSQL_CONNECT_NODE} not yet available, sleeping 5 seconds..."
+            sleep 5
+          done
+          echo "MySQL node ${MYSQL_CONNECT_NODE} is available."
+
+          ROUTER_CONF_DIR="/tmp/mysqlrouter" # 라우터 설정 및 임시 파일 디렉토리
+          ROUTER_CONF_FILE="${ROUTER_CONF_DIR}/mysqlrouter.conf"
+
+          echo "Bootstrapping MySQL Router against ${MYSQL_CONNECT_NODE}..."
+          # --force 옵션은 파드 재시작 시 기존 설정을 덮어쓰고 항상 새로운 메타데이터를 가져오도록 함
+          # 좀 더 안정적인 운영을 원하면, conf 파일이 없을 때만 부트스트랩하도록 조건부 로직 추가 가능
+          mysqlrouter --bootstrap root:"${MYSQL_ROOT_PASSWORD}"@"${MYSQL_CONNECT_NODE}":3306 \
+                      --directory="${ROUTER_CONF_DIR}" \
+                      --conf-bind-address=0.0.0.0 \
+                      --force
+          
+          echo "MySQL Router bootstrapped. Generated config file content:"
+          cat "${ROUTER_CONF_FILE}" || echo "WARN: Config file ${ROUTER_CONF_FILE} not found or 'cat' failed."
+          
+          echo "Starting MySQL Router with generated configuration..."
+          # exec을 사용하여 이 프로세스가 컨테이너의 메인 프로세스가 되도록 함
+          exec mysqlrouter --config="${ROUTER_CONF_FILE}"
+        livenessProbe:
+          tcpSocket:
+            port: 6446 # 읽기/쓰기 포트가 살아있는지 확인
+          initialDelaySeconds: 20 # 부트스트랩 시간 고려
+          periodSeconds: 15
+          timeoutSeconds: 5
+        readinessProbe:
+          tcpSocket:
+            port: 6446 # 읽기/쓰기 포트가 요청받을 준비가 되었는지 확인
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+        volumeMounts:
+        - name: router-conf-storage
+          mountPath: /tmp/mysqlrouter # mysqlrouter.conf 및 기타 런타임 파일 저장
+      volumes:
+      - name: router-conf-storage # 파드가 재시작하면 사라지는 임시 스토리지 (매번 부트스트랩 하므로)
+        emptyDir: {}
+---
+# ======================================================================
+# MySQL Router Service
+# ======================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-router-access # 애플리케이션이 접속할 Router 서비스 이름
+  namespace: default 
+  labels:
+    app: mysql-router-mgr
+spec:
+  selector:
+    app: mysql-router-mgr # 위 Deployment의 파드 레이블과 일치해야 함
+  ports:
+  - name: mysql-rw # Read-Write (Classic Protocol)
+    port: 6446 # 외부에서 이 포트로 접속
+    targetPort: 6446 # Router 파드의 이 포트로 전달
+    protocol: TCP
+  - name: mysql-ro # Read-Only (Classic Protocol)
+    port: 6447
+    targetPort: 6447
+    protocol: TCP
+  # - name: mysqlx-rw # Read-Write (X Protocol)
+  #   port: 6448
+  #   targetPort: 6448
+  # - name: mysqlx-ro # Read-Only (X Protocol)
+  #   port: 6449
+  #   targetPort: 6449
+  type: ClusterIP # 클러스터 내부용. 외부 노출이 필요하면 LoadBalancer 등으로 변경 가능

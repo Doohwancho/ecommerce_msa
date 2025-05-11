@@ -32,10 +32,13 @@ spec:
               value: "product-service"
             - name: PRODUCT_SERVICE_GRPC_PORT
               value: "50051"
-            - name: MYSQL_PRIMARY_HOST
-              value: "mysql-0.mysql-headless"
-            - name: MYSQL_SECONDARY_HOST
-              value: "mysql-1.mysql-headless"
+            # mysql router 
+            - name: MYSQL_ROUTER_HOST   
+              value: "mysql-router-access"
+            - name: MYSQL_ROUTER_RW_PORT  
+              value: "6446"         
+            - name: MYSQL_ROUTER_RO_PORT  
+              value: "6447"
             - name: MYSQL_PORT
               value: "3306"
             - name: MYSQL_USER

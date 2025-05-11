@@ -295,14 +295,6 @@ spec:
           initialDelaySeconds: 120
           periodSeconds: 15
           failureThreshold: 5
-        # readinessProbe:
-        #   exec:
-        #     # Group Replication 멤버 상태까지 확인하려면 더 복잡한 스크립트 필요
-        #     # 여기서는 기본 연결 및 MGR 플러그인 로드 상태 정도만 확인 가능
-        #     command: ["mysql", "-h127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}", "-e", "SELECT 1; SHOW PLUGINS LIKE 'group_replication';"]
-        #   initialDelaySeconds: 90
-        #   periodSeconds: 10
-        #   timeoutSeconds: 5
       volumes:
       - name: config-templates # ConfigMap의 .cnf.tpl 파일들
         configMap:

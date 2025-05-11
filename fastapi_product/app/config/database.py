@@ -19,13 +19,10 @@ MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "root")
 # MYSQL_HOST = os.getenv("MYSQL_HOST", "mysql-service")
 # after replica set
 # MySQL Router 
-MYSQL_ROUTER_HOST = os.getenv('MYSQL_ROUTER_HOST', 'mysql-router')
+MYSQL_ROUTER_HOST = os.getenv('MYSQL_ROUTER_HOST', 'mysql-router-access')
 MYSQL_ROUTER_RW_PORT = os.getenv('MYSQL_ROUTER_RW_PORT', '6446')
 MYSQL_ROUTER_RO_PORT = os.getenv('MYSQL_ROUTER_RO_PORT', '6447')
 
-MYSQL_PRIMARY_HOST = os.getenv('MYSQL_PRIMARY_HOST', 'mysql-0.mysql-headless')
-MYSQL_SECONDARY_HOST = os.getenv('MYSQL_SECONDARY_HOST', 'mysql-1.mysql-headless')
-MYSQL_TERTIARY_HOST = os.getenv('MYSQL_TERTIARY_HOST', 'mysql-2.mysql-headless')
 MYSQL_PORT = os.getenv('MYSQL_PORT', '3306')
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "product_category")
 # before replica set

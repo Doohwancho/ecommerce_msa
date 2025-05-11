@@ -151,8 +151,34 @@ kubectl exec -it mysql-2 -- mysql -u root -proot -e "SELECT * FROM performance_s
 ```
 
 ### c-3. mysql-router와 mysql-cluster 연결 확인 
+
 ```bash
-# mysql-router와 mysql cluster를 붙이기 
+# 먼저 수동으로 Group Replication 만든걸 InnoDB Cluster로 등록한다.
+kubectl exec -it mysql-0 -n default -- mysqlsh root@localhost:3306
+# 비밀번호 입력
+
+JS > \js
+// JavaScript 모드 예시
+var cluster = dba.createCluster('EcommerceMysqlCluster', { adoptFromGR: true });
+
+A new InnoDB Cluster will be created based on the existing replication group on instance 'mysql-0.mysql-headless.default.svc.cluster.local:3306'.
+
+Creating InnoDB Cluster 'EcommerceMysqlCluster' on 'mysql-0.mysql-headless.default.svc.cluster.local:3306'...
+
+Adding Seed Instance...
+Adding Instance 'mysql-0.mysql-headless.default.svc.cluster.local:3306'...
+Adding Instance 'mysql-1.mysql-headless.default.svc.cluster.local:3306'...
+Adding Instance 'mysql-2.mysql-headless.default.svc.cluster.local:3306'...
+Resetting distributed recovery credentials across the cluster...
+Cluster successfully created based on existing replication group.
+
+print(cluster.status());
+```
+
+
+```bash
+#다음 mysql-router를 시작하여, 저 클러스터와 연결시킨다. 
+kubectl apply -f ./k8_configs/mysql_router.yaml
 
 # 먼저 mysql-router 재시작
 kubectl rollout restart deployment mysql-router 
@@ -163,18 +189,21 @@ kubectl get pods | grep mysql-router
 
 # 연결 테스트
 
-# 읽기/쓰기 연결 테스트 (6446 포트, mysql-0(primary))
-# mysql-router 내부에서 6446(primary node의 port)로 연결 확인 
-kubectl exec -it mysql-router-688bc57bdb-cqcbq -- mysql -h 127.0.0.1 -P 6446 -u root -proot -e "SELECT @@hostname, @@port;"
+# 읽기/쓰기 연결 테스트 (Router의 6446 포트)
+# 이 명령은 mysql-router 파드 내부에서 실행하는 것입니다.
+# Router의 6446 포트로 접속하면 현재 PRIMARY 노드(예: mysql-0)로 연결되어야 합니다.
+kubectl exec -it mysql-router-76fdb7c799-6chlq -n default -- mysql -h 127.0.0.1 -P 6446 -u root -proot -e "SELECT @@hostname, @@port;"
 +------------+--------+
 | @@hostname | @@port |
 +------------+--------+
 | mysql-0    |   3306 |
 +------------+--------+
 
-# 읽기 전용 연결 테스트 (6447 포트, mysql-1, mysql-2(secondary))
-# mysql-router 내부에서 6447(secondary node의 port)로 연결 확인 
-kubectl exec -it mysql-router-688bc57bdb-cqcbq -- mysql -h 127.0.0.1 -P 6447 -u root -proot -e "SELECT @@hostname, @@port;"
+
+# 읽기 전용 연결 테스트 (Router의 6447 포트)
+# 이 명령도 mysql-router 파드 내부에서 실행하는 것입니다.
+# Router의 6447 포트로 접속하면 현재 SECONDARY 노드들(예: mysql-1 또는 mysql-2) 중 하나로 연결되어야 합니다.
+kubectl exec -it mysql-router-76fdb7c799-6chlq -n default -- mysql -h 127.0.0.1 -P 6447 -u root -proot -e "SELECT @@hostname, @@port;"
 +------------+--------+
 | @@hostname | @@port |
 +------------+--------+
@@ -188,19 +217,52 @@ kubectl exec -it mysql-router-688bc57bdb-cqcbq -- mysql -h 127.0.0.1 -P 6447 -u 
 ```bash
 kubectl get pod 
 
+
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST                                      | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| group_replication_applier | 271f6bbf-2e3a-11f0-9866-721273200872 | mysql-0.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
+| group_replication_applier | 2848ce32-2e3a-11f0-91a5-e6cd9afb9529 | mysql-1.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | PRIMARY     | 8.0.37         | XCom                       |
+| group_replication_applier | 2998cdfe-2e3a-11f0-a159-a679022f8238 | mysql-2.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+
+# 이게 맨 처음 상태.
+# mysql-1이 primary, 나머지는 secondary
+
+
 # PRIMARY 노드(mysql-0) 중지 (이 명령어는 주의해서 사용하세요!)
 kubectl delete pod mysql-0 --grace-period=0 --force
 
+
+kubectl get pod 
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST                                      | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| group_replication_applier | 271f6bbf-2e3a-11f0-9866-721273200872 | mysql-0.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
+| group_replication_applier | 2848ce32-2e3a-11f0-91a5-e6cd9afb9529 | mysql-1.mysql-headless.default.svc.cluster.local |        3306 | UNREACHABLE  | PRIMARY     | 8.0.37         | XCom                       |
+| group_replication_applier | 2998cdfe-2e3a-11f0-a159-a679022f8238 | mysql-2.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+
+# mysql-1(primary)가 UNREACHABLE 상태로 되었다. 
+# 좀 기다리다가 primary가 영영 죽은거 같으면, 재투표해서 나머지 SECONDARY 둘 중에 하나가 PRIMARY가 된다.
+
+
 # 잠시 대기 후 연결 테스트
 kubectl exec -it mysql-1 -- mysql -u root -proot -e "SELECT * FROM performance_schema.replication_group_members;"
-+---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST            | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
-+---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| group_replication_applier | 58a810af-2b12-11f0-b73f-369ce7864544 | mysql-1.mysql-headless |        3306 | ONLINE       | PRIMARY     | 8.0.37         | MySQL                      |
-| group_replication_applier | 6e9815f3-2b12-11f0-9945-3ed0f090e5de | mysql-2.mysql-headless |        3306 | ONLINE       | SECONDARY   | 8.0.37         | MySQL                      |
-+---------------------------+--------------------------------------+------------------------+-------------+--------------+-------------+----------------+----------------------------+
+
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST                                      | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+| group_replication_applier | 271f6bbf-2e3a-11f0-9866-721273200872 | mysql-0.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | PRIMARY     | 8.0.37         | XCom                       |
+| group_replication_applier | 2848ce32-2e3a-11f0-91a5-e6cd9afb9529 | mysql-1.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
+| group_replication_applier | 2998cdfe-2e3a-11f0-a159-a679022f8238 | mysql-2.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
++---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+
+# 재투표 한 뒤, mysql-0이 primary가 되고, 기존에 primary인 mysql-1은 secondary가 되어 cluster에 재합류된걸 확인할 수 있다.
 ```
 mysql-1이 새로운 primary로 설정된걸 확인할 수 있다.
+
+
 
 
 
