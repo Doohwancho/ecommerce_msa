@@ -4,6 +4,8 @@ import product_pb2_grpc
 from fastapi import HTTPException
 import logging
 from typing import List, Tuple, Optional
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from grpc import RpcError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +33,12 @@ class ProductClient:
             self.stub = product_pb2_grpc.ProductServiceStub(self.channel)
             logger.info("Created new gRPC channel to product-service")
         
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((RpcError, ConnectionError)),
+        reraise=True
+    )
     async def get_product(self, product_id: str):
         try:
             await self._ensure_channel()
@@ -57,6 +65,12 @@ class ProductClient:
             logger.error(f"Unexpected error while getting product: {e}")
             raise HTTPException(status_code=500, detail="Internal server error")
         
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((RpcError, ConnectionError)),
+        reraise=True
+    )
     async def check_availability(self, product_id: str, quantity: int) -> Tuple[bool, product_pb2.ProductResponse]:
         try:
             await self._ensure_channel()
@@ -92,6 +106,12 @@ class ProductClient:
             logger.error(f"Unexpected error while checking availability: {e}")
             raise HTTPException(status_code=500, detail="Internal server error")
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((RpcError, ConnectionError)),
+        reraise=True
+    )
     async def check_products_exist(self, product_ids: List[str]):
         try:
             await self._ensure_channel()
@@ -111,6 +131,12 @@ class ProductClient:
             logger.error(f"Unexpected error while checking products existence: {e}")
             raise HTTPException(status_code=500, detail="Internal server error")
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((RpcError, ConnectionError)),
+        reraise=True
+    )
     async def check_and_reserve_inventory(self, product_id: str, quantity: int) -> tuple[bool, str]:
         """
         제품 재고 확인과 예약을 한 번에 수행합니다.
@@ -148,6 +174,12 @@ class ProductClient:
             logger.error(f"Error calling CheckAndReserveInventory gRPC method: {str(e)}")
             return False, str(e)
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((RpcError, ConnectionError)),
+        reraise=True
+    )
     async def release_inventory(self, product_id: str, quantity: int) -> bool:
         """
         SAGA 롤백을 위해 예약된 재고를 해제합니다.
@@ -170,6 +202,12 @@ class ProductClient:
             logger.error(f"Error calling ReleaseInventory gRPC method: {str(e)}")
             return False
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=10),
+        retry=retry_if_exception_type((RpcError, ConnectionError)),
+        reraise=True
+    )
     async def get_product_inventory(self, product_id: str) -> Optional[product_pb2.ProductInventoryResponse]:
         """
         제품의 재고 정보를 조회합니다.

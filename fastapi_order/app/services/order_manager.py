@@ -416,8 +416,6 @@ class OrderManager:
             logger.error(f"Failed to handle payment_failed event: {str(e)}")
             await self._store_failed_event('payment_failed_parsing', original_event_data, str(e))
 
-
-
     async def handle_payment_success(self, event_data):
         original_event_data = event_data  # 원본 데이터 보존
         retry_count = 0
