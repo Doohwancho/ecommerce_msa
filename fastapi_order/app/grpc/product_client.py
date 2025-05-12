@@ -6,6 +6,7 @@ import logging
 from typing import List, Tuple, Optional
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from grpc import RpcError
+import asyncio
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -26,6 +27,7 @@ class ProductClient:
     def __init__(self):
         self.channel = None
         self.stub = None
+        self.default_timeout = 5  # 기본 timeout 5초
         
     async def _ensure_channel(self):
         if self.channel is None:
@@ -42,15 +44,19 @@ class ProductClient:
     async def get_product(self, product_id: str):
         try:
             await self._ensure_channel()
-                
-            request = product_pb2.ProductRequest(product_id=product_id)
-            response = await self.stub.GetProduct(request)
             
-            # Check if product exists
-            if not response.product_id:
-                raise HTTPException(status_code=404, detail="Product not found")
+            async with asyncio.timeout(self.default_timeout):
+                request = product_pb2.ProductRequest(product_id=product_id)
+                response = await self.stub.GetProduct(request)
                 
-            return response
+                # Check if product exists
+                if not response.product_id:
+                    raise HTTPException(status_code=404, detail="Product not found")
+                    
+                return response
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout while getting product {product_id}")
+            raise HTTPException(status_code=504, detail="Product service timeout")
         except grpc.RpcError as e:
             logger.error(f"gRPC error while getting product: {e}")
             if e.code() == grpc.StatusCode.NOT_FOUND:
@@ -75,25 +81,29 @@ class ProductClient:
         try:
             await self._ensure_channel()
             
-            # Get the product and its inventory information
-            product = await self.get_product(product_id)
-            if not product:
-                logger.error(f"Product {product_id} not found")
-                return False, None
+            async with asyncio.timeout(self.default_timeout):
+                # Get the product and its inventory information
+                product = await self.get_product(product_id)
+                if not product:
+                    logger.error(f"Product {product_id} not found")
+                    return False, None
+                    
+                # Get inventory information
+                inventory = await self.get_product_inventory(product_id)
+                if not inventory:
+                    logger.error(f"Inventory information not found for product {product_id}")
+                    return False, product
                 
-            # Get inventory information
-            inventory = await self.get_product_inventory(product_id)
-            if not inventory:
-                logger.error(f"Inventory information not found for product {product_id}")
-                return False, product
-            
-            # Check if stock is sufficient
-            if inventory.available_stock < quantity:
-                logger.warning(f"Product {product_id} has insufficient stock. Required: {quantity}, Available: {inventory.available_stock}")
-                return False, product
-                
-            logger.info(f"Product {product_id} has sufficient stock. Required: {quantity}, Available: {inventory.available_stock}")
-            return True, product
+                # Check if stock is sufficient
+                if inventory.available_stock < quantity:
+                    logger.warning(f"Product {product_id} has insufficient stock. Required: {quantity}, Available: {inventory.available_stock}")
+                    return False, product
+                    
+                logger.info(f"Product {product_id} has sufficient stock. Required: {quantity}, Available: {inventory.available_stock}")
+                return True, product
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout while checking availability for product {product_id}")
+            raise HTTPException(status_code=504, detail="Product service timeout")
         except grpc.RpcError as e:
             logger.error(f"gRPC error while checking availability: {e}")
             if e.code() == grpc.StatusCode.UNAVAILABLE:
@@ -116,9 +126,13 @@ class ProductClient:
         try:
             await self._ensure_channel()
             
-            request = product_pb2.ProductsExistRequest(product_ids=product_ids)
-            response = await self.stub.CheckProductsExist(request)
-            return response
+            async with asyncio.timeout(self.default_timeout):
+                request = product_pb2.ProductsExistRequest(product_ids=product_ids)
+                response = await self.stub.CheckProductsExist(request)
+                return response
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout while checking products existence: {product_ids}")
+            raise HTTPException(status_code=504, detail="Product service timeout")
         except grpc.RpcError as e:
             logger.error(f"gRPC error while checking products existence: {e}")
             if e.code() == grpc.StatusCode.UNAVAILABLE:
@@ -151,17 +165,22 @@ class ProductClient:
         try:
             await self._ensure_channel()
             
-            request = product_pb2.InventoryRequest(
-                product_id=product_id,
-                quantity=quantity
-            )
-            
-            response = await self.stub.CheckAndReserveInventory(request)
-            
-            if not response.success:
-                logger.warning(f"Failed to check and reserve inventory for product {product_id}: {response.message}")
-            
-            return response.success, response.message
+            # 재고 예약은 더 긴 timeout 설정
+            async with asyncio.timeout(10):  # 10초
+                request = product_pb2.InventoryRequest(
+                    product_id=product_id,
+                    quantity=quantity
+                )
+                
+                response = await self.stub.CheckAndReserveInventory(request)
+                
+                if not response.success:
+                    logger.warning(f"Failed to check and reserve inventory for product {product_id}: {response.message}")
+                
+                return response.success, response.message
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout while checking and reserving inventory for product {product_id}")
+            return False, "Service timeout while reserving inventory"
         except grpc.RpcError as e:
             logger.error(f"gRPC error while checking and reserving inventory: {e}")
             if e.code() == grpc.StatusCode.UNAVAILABLE:
@@ -187,17 +206,21 @@ class ProductClient:
         try:
             await self._ensure_channel()
             
-            request = product_pb2.InventoryRequest(
-                product_id=product_id,
-                quantity=quantity
-            )
-            
-            response = await self.stub.ReleaseInventory(request)
-            
-            if not response.success:
-                logger.warning(f"Failed to release inventory for product {product_id}: {response.message}")
-            
-            return response.success
+            async with asyncio.timeout(self.default_timeout):
+                request = product_pb2.InventoryRequest(
+                    product_id=product_id,
+                    quantity=quantity
+                )
+                
+                response = await self.stub.ReleaseInventory(request)
+                
+                if not response.success:
+                    logger.warning(f"Failed to release inventory for product {product_id}: {response.message}")
+                
+                return response.success
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout while releasing inventory for product {product_id}")
+            return False
         except Exception as e:
             logger.error(f"Error calling ReleaseInventory gRPC method: {str(e)}")
             return False
@@ -221,14 +244,18 @@ class ProductClient:
         try:
             await self._ensure_channel()
             
-            request = product_pb2.ProductRequest(product_id=product_id)
-            response = await self.stub.GetProductInventory(request)
-            
-            # Check if product exists
-            if not response.product_id:
-                return None
+            async with asyncio.timeout(self.default_timeout):
+                request = product_pb2.ProductRequest(product_id=product_id)
+                response = await self.stub.GetProductInventory(request)
                 
-            return response
+                # Check if product exists
+                if not response.product_id:
+                    return None
+                    
+                return response
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout while getting product inventory for product {product_id}")
+            raise HTTPException(status_code=504, detail="Product service timeout")
         except grpc.RpcError as e:
             logger.error(f"gRPC error while getting product inventory: {e}")
             if e.code() == grpc.StatusCode.NOT_FOUND:

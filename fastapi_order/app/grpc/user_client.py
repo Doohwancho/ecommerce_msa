@@ -6,6 +6,7 @@ import os
 import logging
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from grpc import RpcError
+import asyncio
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -30,6 +31,7 @@ class UserClient:
         logger.info(f"Initialized UserClient with target: {self.target}")
         self.channel = None
         self.stub = None
+        self.default_timeout = 5  # 기본 timeout 5초
 
     @retry(
         stop=stop_after_attempt(3),
@@ -48,10 +50,16 @@ class UserClient:
                 self.stub = user_pb2_grpc.UserServiceStub(self.channel)
 
             logger.info(f"Attempting to get user with ID: {user_id}")
-            request = user_pb2.UserRequest(user_id=user_id)
-            response = await self.stub.GetUser(request)
-            logger.info(f"Successfully got user: {response}")
-            return response
+            
+            async with asyncio.timeout(self.default_timeout):
+                request = user_pb2.UserRequest(user_id=user_id)
+                response = await self.stub.GetUser(request)
+                logger.info(f"Successfully got user: {response}")
+                return response
+                
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout while getting user {user_id}")
+            raise HTTPException(status_code=504, detail="User service timeout")
         except grpc.RpcError as e:
             logger.error(f"gRPC error while getting user: {e}")
             if e.code() == grpc.StatusCode.NOT_FOUND:
