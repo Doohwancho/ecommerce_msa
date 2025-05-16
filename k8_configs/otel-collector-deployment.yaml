@@ -42,5 +42,6 @@ spec:
   - name: prometheus
     port: 8889
     targetPort: 8889
+    protocol: TCP
   selector:
     app: otel-collector

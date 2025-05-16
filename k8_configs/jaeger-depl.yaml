@@ -13,22 +13,39 @@ spec:
     spec:
       containers:
       - name: jaeger
-        image: jaegertracing/all-in-one:latest
+        image: jaegertracing/all-in-one:1.69.0
         ports:
-        - containerPort: 16686
-        - containerPort: 14250
+        - name: ui-http          # Jaeger UI
+          containerPort: 16686
+        - name: otlp-grpc        # OTLP gRPC 수신 포트
+          containerPort: 4317
+        - name: otlp-http        # OTLP HTTP 수신 포트
+          containerPort: 4318
+        # 이전 버전 Jaeger 호환성을 위한 포트들 (OTLP가 주력이면 필수는 아님)
+        - name: collector-grpc   # Jaeger 네이티브 gRPC Thrift (otel-collector가 아닌 다른 곳에서 사용 시)
+          containerPort: 14250
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: jaeger
+  name: jaeger # OpenTelemetry Collector가 이 이름으로 Jaeger에 접속합니다.
 spec:
   ports:
-  - name: http
+  - name: ui-http                 # Jaeger UI 접속용
     port: 16686
-    targetPort: 16686
-  - name: grpc
+    targetPort: 16686            # Deployment의 'ui-http' containerPort와 일치
+    protocol: TCP
+  - name: otlp-grpc              # OTel Collector가 OTLP gRPC로 데이터를 보낼 포트
+    port: 4317
+    targetPort: 4317             # Deployment의 'otlp-grpc' containerPort와 일치
+    protocol: TCP
+  - name: otlp-http              # (선택 사항) OTLP HTTP를 노출할 경우
+    port: 4318
+    targetPort: 4318             # Deployment의 'otlp-http' containerPort와 일치
+    protocol: TCP
+  - name: collector-grpc-thrift # (선택 사항) 이전 방식(Thrift) 호환성을 위해
     port: 14250
-    targetPort: 14250
+    targetPort: 14250            # Deployment의 'collector-grpc' containerPort와 일치
+    protocol: TCP
   selector:
     app: jaeger

@@ -12,8 +12,10 @@ tracer = trace.get_tracer(__name__)
 async def create_user(user: UserCreate):
     with tracer.start_as_current_span("create_user") as span:
         try:
-            span.set_attribute("user.email", user.email)
-            span.set_attribute("user.username", user.username)
+            span.set_attribute("user.name", user.name)
+            span.set_attribute("user.age", user.age)
+            span.set_attribute("user.occupation", user.occupation)
+            span.set_attribute("user.learning", user.learning)
             result = await UserService.create_user(user)
             span.set_status(Status(StatusCode.OK))
             return result
