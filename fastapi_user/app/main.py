@@ -1,12 +1,13 @@
-from fastapi import FastAPI, Depends
-from app.api.api import api_router
+from fastapi import FastAPI, Depends, HTTPException
 import logging
 import asyncio
 import uvicorn
+from app.api.api import api_router
 from app.grpc.user_server import serve as user_serve
 from contextlib import asynccontextmanager
 from app.config.grpc_config import set_grpc_task, get_grpc_task
 from app.config.database import get_write_mongo_client, get_read_mongo_client
+from app.config.otel import setup_telemetry
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.responses import JSONResponse
 
@@ -32,6 +33,9 @@ async def lifespan(app: FastAPI):
 
 # Create application with lifespan handler
 app = FastAPI(title="User Service API", lifespan=lifespan)
+
+# Initialize OpenTelemetry
+setup_telemetry()
 
 # API router registration
 app.include_router(api_router, prefix="/api")

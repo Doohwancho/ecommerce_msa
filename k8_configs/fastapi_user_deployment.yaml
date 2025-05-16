@@ -15,7 +15,7 @@ spec:
         app: user-service
     spec:
       containers:
-        - name: user-service-container
+        - name: user-service
           image: doohwancho/fastapi-user-service:latest
           imagePullPolicy: Always
           ports:
@@ -25,7 +25,7 @@ spec:
               containerPort: 50051
           env:
             - name: MONGODB_HOST
-              value: "mongodb-stateful-0.mongodb-service,mongodb-stateful-1.mongodb-service, mongodb-stateful-2.mongodb-service"
+              value: "mongodb-stateful-0.mongodb-service.default.svc.cluster.local:27017,mongodb-stateful-1.mongodb-service.default.svc.cluster.local:27017,mongodb-stateful-2.mongodb-service.default.svc.cluster.local:27017"
             - name: MONGODB_REPLICA_SET
               value: "rs0"
             - name: MONGODB_AUTH_SOURCE
@@ -45,6 +45,16 @@ spec:
                 secretKeyRef:
                   name: mongodb-secret
                   key: mongo-root-password
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector:4317"
+            - name: OTEL_SERVICE_NAME
+              value: "fastapi-user-service"
+            - name: OTEL_TRACES_SAMPLER
+              value: "always_on"
+            - name: OTEL_METRICS_EXPORTER
+              value: "otlp"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
           # Liveness Probe
           livenessProbe:
             httpGet:
@@ -81,3 +91,4 @@ spec:
       protocol: TCP
       port: 50051
       targetPort: 50051
+  type: ClusterIP

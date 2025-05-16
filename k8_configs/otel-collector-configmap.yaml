@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      batch:
+        timeout: 1s
+        send_batch_size: 1024
+
+    exporters:
+      debug:
+        verbosity: detailed
+      otlp/tojaeger: # OTLP exporter에 이름 부여 (예: tojaeger)
+        endpoint: jaeger:4317 # Jaeger 서비스의 OTLP gRPC 엔드포인트 (Jaeger 서비스 이름과 포트 확인 필요)
+        tls:
+          insecure: true # Jaeger의 TLS 설정에 맞춰야 함
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug, otlp/tojaeger]
+        metrics:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug]
+        logs:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [debug]
