@@ -7,3 +7,18 @@ cryptography==40.0.1
 python-dotenv==1.0.0
 aiokafka==0.10.0
 kafka-python==2.0.2
+
+# OpenTelemetry Core 패키지
+opentelemetry-api==1.21.0
+opentelemetry-sdk==1.21.0
+opentelemetry-exporter-otlp==1.21.0 # OTLP 포맷으로 익스포트 (컬렉터로 보냄)
+opentelemetry-semantic-conventions==0.42b0 # 의미론적 규칙 정의
+
+# OpenTelemetry Instrumentation 패키지 (Payment 모듈이 사용하는 기술들)
+opentelemetry-instrumentation-fastapi==0.42b0 # FastAPI 웹 요청 계측
+opentelemetry-instrumentation-sqlalchemy==0.42b0 # SQLAlchemy ORM 계측 (MySQL 쿼리 추적)
+opentelemetry-instrumentation-kafka-python==0.42b0 # kafka-python 클라이언트 계측 (Kafka 메시지 추적)
+# opentelemetry-instrumentation-aiokafka # aiokafka 전용 계측이 있다면 추가 (따로 없을 수도 있음)
+
+# 만약 Payment 모듈이 gRPC 클라이언트로 다른 서비스 호출하면 아래 추가
+# opentelemetry-instrumentation-grpc==0.42b0

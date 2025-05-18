@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.api import api_router
 from app.config.payment_database import Base, write_engine, read_engine, WriteSessionLocal
+from app.config.otel import setup_telemetry
 from app.services.payment_manager import PaymentManager
 from contextlib import asynccontextmanager
 from app.config.payment_logging import logger
@@ -87,6 +88,9 @@ app = FastAPI(
 
 # API 라우터 등록
 app.include_router(api_router, prefix="/api")
+
+# Initialize OpenTelemetry
+setup_telemetry()
 
 # 라이브니스 프로브
 @app.get("/health/live")

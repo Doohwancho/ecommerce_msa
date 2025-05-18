@@ -7,6 +7,8 @@ import logging
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from grpc import RpcError
 import asyncio
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -32,6 +34,7 @@ class UserClient:
         self.channel = None
         self.stub = None
         self.default_timeout = 5  # 기본 timeout 5초
+        self.tracer = trace.get_tracer(__name__)
 
     @retry(
         stop=stop_after_attempt(3),
@@ -40,39 +43,59 @@ class UserClient:
         reraise=True
     )
     async def get_user(self, user_id: str):
-        try:
-            if not self.channel or self.channel._channel.is_closed():
-                logger.info(f"Creating gRPC channel to {self.target}")
-                self.channel = grpc.aio.insecure_channel(
-                    self.target,
-                    options=CHANNEL_OPTIONS
-                )
-                self.stub = user_pb2_grpc.UserServiceStub(self.channel)
-
-            logger.info(f"Attempting to get user with ID: {user_id}")
-            
-            async with asyncio.timeout(self.default_timeout):
-                request = user_pb2.UserRequest(user_id=user_id)
-                response = await self.stub.GetUser(request)
-                logger.info(f"Successfully got user: {response}")
-                return response
+        with self.tracer.start_as_current_span("grpc.client.get_user") as span:
+            try:
+                # 요청 정보 추적
+                span.set_attribute("user.id", user_id)
+                span.set_attribute("service.target", self.target)
                 
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout while getting user {user_id}")
-            raise HTTPException(status_code=504, detail="User service timeout")
-        except grpc.RpcError as e:
-            logger.error(f"gRPC error while getting user: {e}")
-            if e.code() == grpc.StatusCode.NOT_FOUND:
-                raise HTTPException(status_code=404, detail="User not found")
-            elif e.code() == grpc.StatusCode.UNAVAILABLE:
-                logger.error(f"User service is unavailable. Target: {self.target}")
-                raise HTTPException(status_code=503, detail="User service unavailable")
-            else:
-                logger.error(f"Unexpected gRPC error: {e}")
+                if not self.channel or self.channel._channel.is_closed():
+                    logger.info(f"Creating gRPC channel to {self.target}")
+                    self.channel = grpc.aio.insecure_channel(
+                        self.target,
+                        options=CHANNEL_OPTIONS
+                    )
+                    self.stub = user_pb2_grpc.UserServiceStub(self.channel)
+                    span.set_attribute("channel.created", True)
+
+                logger.info(f"Attempting to get user with ID: {user_id}")
+                
+                async with asyncio.timeout(self.default_timeout):
+                    request = user_pb2.UserRequest(user_id=user_id)
+                    response = await self.stub.GetUser(request)
+                    
+                    # 응답 정보 추적
+                    if response:
+                        span.set_attributes({
+                            "user.name": response.name,
+                            "user.age": response.age,
+                            "user.occupation": response.occupation,
+                            "user.learning": response.learning
+                        })
+                    
+                    logger.info(f"Successfully got user: {response}")
+                    span.set_status(Status(StatusCode.OK))
+                    return response
+                    
+            except asyncio.TimeoutError:
+                span.set_status(Status(StatusCode.ERROR, "User service timeout"))
+                logger.error(f"Timeout while getting user {user_id}")
+                raise HTTPException(status_code=504, detail="User service timeout")
+            except grpc.RpcError as e:
+                span.set_status(Status(StatusCode.ERROR, str(e)))
+                logger.error(f"gRPC error while getting user: {e}")
+                if e.code() == grpc.StatusCode.NOT_FOUND:
+                    raise HTTPException(status_code=404, detail="User not found")
+                elif e.code() == grpc.StatusCode.UNAVAILABLE:
+                    logger.error(f"User service is unavailable. Target: {self.target}")
+                    raise HTTPException(status_code=503, detail="User service unavailable")
+                else:
+                    logger.error(f"Unexpected gRPC error: {e}")
+                    raise HTTPException(status_code=500, detail="Internal server error")
+            except Exception as e:
+                span.set_status(Status(StatusCode.ERROR, str(e)))
+                logger.error(f"Unexpected error while getting user: {e}")
                 raise HTTPException(status_code=500, detail="Internal server error")
-        except Exception as e:
-            logger.error(f"Unexpected error while getting user: {e}")
-            raise HTTPException(status_code=500, detail="Internal server error")
 
     async def close(self):
         if self.channel:

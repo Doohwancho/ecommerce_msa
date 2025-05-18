@@ -15,6 +15,7 @@ from app.config.database import (
     get_write_product_collection, get_read_product_collection
 )
 from app.config.elasticsearch import elasticsearch_config
+from app.config.otel import setup_telemetry
 from fastapi.responses import JSONResponse
 import os
 
@@ -73,7 +74,9 @@ async def lifespan(app: FastAPI):
         logger.info("Elasticsearch initialized")
     except Exception as e:
         logger.error(f"Failed to initialize Elasticsearch: {e}")
-        raise
+        # Elasticsearch 초기화 실패 시에도 애플리케이션은 계속 실행
+        logger.warning("Continuing without Elasticsearch support")
+        # raise
     
     # Start gRPC server in background
     grpc_task = asyncio.create_task(grpc_serve())
@@ -93,8 +96,12 @@ async def lifespan(app: FastAPI):
     logger.info("Kafka consumer stopped")
 
     # Elasticsearch 연결 종료
-    await elasticsearch_config.close()
-    logger.info("Elasticsearch connection closed")
+    try:
+        await elasticsearch_config.close()
+        logger.info("Elasticsearch connection closed")
+    except Exception as e:
+        logger.error(f"Error closing Elasticsearch connection: {e}")
+        # raise
 
     # Cancel gRPC task
     if grpc_task:
@@ -112,6 +119,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+setup_telemetry()
 
 # API 라우터 등록
 app.include_router(api_router, prefix="/api")
@@ -171,14 +180,15 @@ async def readiness():
         status["mongodb_read"] = "failed"
     
     # 3. Elasticsearch 연결 확인
-    try:
-        es_client = await elasticsearch_config.get_client()
-        info = await es_client.info()
-        status["elasticsearch"] = "connected"
-    except Exception as e:
-        logger.error(f"Elasticsearch connection failed: {str(e)}")
-        errors.append(f"Elasticsearch: {str(e)}")
-        status["elasticsearch"] = "failed"
+    # 리소스 아껴야 하니까 당장은 주석처리한다. 
+    # try:
+    #     es_client = await elasticsearch_config.get_client()
+    #     info = await es_client.info()
+    #     status["elasticsearch"] = "connected"
+    # except Exception as e:
+    #     logger.error(f"Elasticsearch connection failed: {str(e)}")
+    #     errors.append(f"Elasticsearch: {str(e)}")
+    #     status["elasticsearch"] = "failed"
     
     # 4. gRPC 서버 상태 확인
     try:

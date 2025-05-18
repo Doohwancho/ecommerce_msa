@@ -5,7 +5,7 @@ metadata:
   labels:
     app: payment-service
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: payment-service
@@ -22,31 +22,31 @@ spec:
             - name: http
               containerPort: 8000
           env:
+            # mysql
             - name: MYSQL_PORT
               value: "3306"
+            - name: MYSQL_ROUTER_HOST
+              value: "mycluster"
+            - name: MYSQL_ROUTER_RW_PORT
+              value: "6446"
+            - name: MYSQL_ROUTER_RO_PORT
+              value: "6447"
+            - name: MYSQL_HOST
+              value: "mysql-service"
             - name: MYSQL_USER
               value: "root"
             - name: MYSQL_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: mysql-secret
-                  key: mysql-root-password
-            # mysql router 
-            - name: MYSQL_ROUTER_HOST   
-              value: "mycluster" 
-            - name: MYSQL_ROUTER_RW_PORT  
-              value: "6446"         
-            - name: MYSQL_ROUTER_RO_PORT  
-              value: "6447"
-            - name: MYSQL_HOST
-              value: "mysql-service"
-            - name: MYSQL_PASSWORD
-              valueFrom:
-                secretKeyRef:
                   name: mysql-root-password
                   key: rootPassword
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: mysql-database
             - name: KAFKA_BOOTSTRAP_SERVERS
-              valueFr:
+              valueFrom:
                 configMapKeyRef:
                   name: kafka-config
                   key: KAFKA_BOOTSTRAP_SERVERS

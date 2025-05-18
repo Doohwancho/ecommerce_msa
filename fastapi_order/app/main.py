@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.api import api_router
 from app.config.database import Base, write_engine, read_engine, WriteSessionLocal
+from app.config.otel import setup_telemetry
 from app.services.kafka_service import init_kafka_consumer, stop_kafka_consumer, kafka_consumer
 import logging
 import asyncio
@@ -82,6 +83,9 @@ app = FastAPI(title="Order Service API", lifespan=lifespan)
 
 # API router registration
 app.include_router(api_router, prefix="/api")
+
+# Initialize OpenTelemetry
+setup_telemetry()
 
 # @app.get("/health")
 # def health_check():

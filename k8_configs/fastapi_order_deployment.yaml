@@ -5,7 +5,7 @@ metadata:
   labels:
     app: order-service
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: order-service
@@ -32,7 +32,7 @@ spec:
               value: "product-service"
             - name: PRODUCT_SERVICE_GRPC_PORT
               value: "50051"
-            # mysql router 
+            # mysql 
             - name: MYSQL_ROUTER_HOST   
               value: "mycluster"
             - name: MYSQL_ROUTER_RW_PORT  
@@ -48,18 +48,30 @@ spec:
                 secretKeyRef:
                   name: mysql-root-password
                   key: rootPassword
-            - name: MYSQL_HOST
-              value: "mysql-service"
             - name: MYSQL_DATABASE
               valueFrom:
                 secretKeyRef:
-                  name: mysql-secret
+                  name: mysql-secret 
                   key: mysql-database
+            - name: MYSQL_HOST
+              value: "mysql-service"
+            # kafka
             - name: KAFKA_BOOTSTRAP_SERVERS
               valueFrom:
                 configMapKeyRef:
                   name: kafka-config
                   key: KAFKA_BOOTSTRAP_SERVERS
+            # otel
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector:4317"
+            - name: OTEL_SERVICE_NAME
+              value: "fastapi-user-service"
+            - name: OTEL_TRACES_SAMPLER
+              value: "always_on"
+            - name: OTEL_METRICS_EXPORTER
+              value: "otlp"
+            - name: OTEL_TRACES_EXPORTER
+              value: "otlp"
           # Liveness Probe
           livenessProbe:
             httpGet:
