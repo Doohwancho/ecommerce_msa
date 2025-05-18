@@ -34,7 +34,7 @@ spec:
               value: "50051"
             # mysql router 
             - name: MYSQL_ROUTER_HOST   
-              value: "mysql-router-access"
+              value: "mycluster"
             - name: MYSQL_ROUTER_RW_PORT  
               value: "6446"         
             - name: MYSQL_ROUTER_RO_PORT  
@@ -46,8 +46,8 @@ spec:
             - name: MYSQL_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: mysql-secret
-                  key: mysql-root-password
+                  name: mysql-root-password
+                  key: rootPassword
             - name: MYSQL_HOST
               value: "mysql-service"
             - name: MYSQL_DATABASE

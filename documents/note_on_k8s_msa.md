@@ -60,287 +60,220 @@ rs.status()
 rs.add("mongodb-stateful-2.mongodb-service.default.svc.cluster.local:27017")
 ```
 
-## c. mysql에 replica set 설정 
+## c. mysql InnoDB cluter w/ router
+https://dev.mysql.com/doc/mysql-operator/en/ 
+기반 
 
-### c-1. mysql과 mysql-shell이된 설치된 docker을 말아올리기 
-```bash
-cd mysql/
+### c-1. crds 
+custom resource definition 다운로드 (for operator)
+```bash 
+kubectl apply -f k8_configs/mysql-deploy-crds.yaml
 
-docker buildx build --platform linux/arm64 -t doohwancho/mysql-custom:8.0.29 --push .
+# 원본 삭제 
+# kubectl delete -f https://raw.githubusercontent.com/mysql/mysql-operator/trunk/deploy/deploy-crds.yaml
+
+# 원본 
+# kubectl apply -f https://raw.githubusercontent.com/mysql/mysql-operator/trunk/deploy/deploy-crds.yaml
 ```
 
-### c-2. mysql group replication setting (1 primary, 2 secondary)
+### c-2. operator 
 ```bash
-kubectl apply -f k8_configs/mysql_depl_serv.yaml
+kubectl delete -f k8_configs/mysql-oprator.yaml
 
-# 수동으로 mysql-0,1,2 실행시키고 group cluster 수동으로 만들고 join 시키기
-kubectl apply -f ./k8_configs/mysql_depl_serv.yaml
-# wait for mysql-0,1,2 to start
-kubectl exec -it mysql-0 -n default -- mysqlsh root@localhost:3306
-\sql
-SET GLOBAL group_replication_bootstrap_group=ON;
-START GROUP_REPLICATION;
-SET GLOBAL group_replication_bootstrap_group=OFF;
--- 잘 됬는지 확인 (MEMBER_ROLE에 PRIMARY 있으면 된거)
-SELECT * FROM performance_schema.replication_group_members;
+kubectl apply -f k8_configs/mysql-operator.yaml
 
-# mysql-1,2 각자 접속해서 cluster에 join 시키기 
-kubectl exec -it mysql-1 -n default -- mysqlsh root@localhost:3306
-RESET MASTER;   # local GTID 이력 삭제 
-START GROUP_REPLICATION;
-SELECT * FROM performance_schema.replication_group_members;
+# 원본 삭제 
+# kubectl delete -f https://raw.githubusercontent.com/mysql/mysql-operator/trunk/deploy/deploy-operator.yaml --ignore-not-found=true
 
-kubectl exec -it mysql-2 -n default -- mysqlsh root@localhost:3306
-RESET MASTER;   # local GTID 이력 삭제 
-START GROUP_REPLICATION;
-SELECT * FROM performance_schema.replication_group_members;
-# 노드가 3개이고, 하나는 primary, 2개는 secondary임을 확인 
+# 원본인데 sidecar에 권한에러나서 조금 수정함
+#kubectl apply -f https://raw.githubusercontent.com/mysql/mysql-operator/trunk/deploy/deploy-operator.yaml
 
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST                                      | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| group_replication_applier | 271f6bbf-2e3a-11f0-9866-721273200872 | mysql-0.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | PRIMARY     | 8.0.37         | XCom                       |
-| group_replication_applier | 2848ce32-2e3a-11f0-91a5-e6cd9afb9529 | mysql-1.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
-| group_replication_applier | 2998cdfe-2e3a-11f0-a159-a679022f8238 | mysql-2.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
+kubectl get pods -n mysql-operator
 
-B. failover 테스트
-일부러 pod 하나 죽이기 죽이기 
-kubectl delete pod mysql-0 -n default
-kubectl exec -it mysql-1 -n default -- mysqlsh root@localhost:3306
-\sql
-SELECT * FROM performance_schema.replication_group_members;
-
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST                                      | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| group_replication_applier | 271f6bbf-2e3a-11f0-9866-721273200872 | mysql-0.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
-| group_replication_applier | 2848ce32-2e3a-11f0-91a5-e6cd9afb9529 | mysql-1.mysql-headless.default.svc.cluster.local |        3306 | UNREACHABLE  | PRIMARY     | 8.0.37         | XCom                       |
-| group_replication_applier | 2998cdfe-2e3a-11f0-a159-a679022f8238 | mysql-2.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-
-# 하나가 unreachable 상태임이 확인된다.
-# 좀 기다리다가 primary가 완전히 맛이 갔다고 판단되는 경우, 재투표해서 1 primary, 1 secondary가 된다.
-
-
-C. 자동 recovery 확인 
-kubectl delete pod mysql-1 -n default
-# 하나 죽이면 unreachable 상태가 된다
-kubectl get pod
-# restart 한 후에
-kubectl exec -it mysql-0 -n default -- mysqlsh root@localhost:3306
-\sql
-SELECT * FROM performance_schema.replication_group_members;
-
-# cluster에 pod 3개, 1 primary, 2 secondary인지 확인 
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST                                      | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| group_replication_applier | 271f6bbf-2e3a-11f0-9866-721273200872 | mysql-0.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | PRIMARY     | 8.0.37         | XCom                       |
-| group_replication_applier | 2848ce32-2e3a-11f0-91a5-e6cd9afb9529 | mysql-1.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
-| group_replication_applier | 2998cdfe-2e3a-11f0-a159-a679022f8238 | mysql-2.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-
-# 1. UNREACHABLE -> ONLINE 복구되었고,
-# 2. primary를 죽이니까, 재투표로 기존에 secondary가 primary가 되고 재시작한 원래 primary가 secondary가 된걸 확인 
-
-
-# cluster가 잘 붙었는지 확인
-kubectl exec -it mysql-1 -- mysql -u root -proot -e "SELECT * FROM performance_schema.replication_group_members;"
-kubectl exec -it mysql-2 -- mysql -u root -proot -e "SELECT * FROM performance_schema.replication_group_members;" 
+kubectl logs mysql-operator-7dd46bc99d-7fqvr -n mysql-operator
 ```
 
-### c-3. mysql-router와 mysql-cluster 연결 확인 
-
 ```bash
-# 먼저 수동으로 Group Replication 만든걸 InnoDB Cluster로 등록한다.
-kubectl exec -it mysql-0 -n default -- mysqlsh root@localhost:3306
-# 비밀번호 입력
+kubectl get deployment mysql-operator --namespace mysql-operator
+```
 
-JS > \js
-// JavaScript 모드 예시
-var cluster = dba.createCluster('EcommerceMysqlCluster', { adoptFromGR: true });
+### c-3. 비밀번호 
+```bash 
+# 기존 mypwds Secret 삭제 (클러스터 삭제가 안 되더라도 일단 지우자)
+kubectl delete secret mysql-root-password -n default
 
-A new InnoDB Cluster will be created based on the existing replication group on instance 'mysql-0.mysql-headless.default.svc.cluster.local:3306'.
+# 비밀번호 
+echo -n 'root' | base64
+cm9vdA==
 
-Creating InnoDB Cluster 'EcommerceMysqlCluster' on 'mysql-0.mysql-headless.default.svc.cluster.local:3306'...
 
-Adding Seed Instance...
-Adding Instance 'mysql-0.mysql-headless.default.svc.cluster.local:3306'...
-Adding Instance 'mysql-1.mysql-headless.default.svc.cluster.local:3306'...
-Adding Instance 'mysql-2.mysql-headless.default.svc.cluster.local:3306'...
-Resetting distributed recovery credentials across the cluster...
-Cluster successfully created based on existing replication group.
+kubectl create secret generic mysql-root-password -n default \
+  --from-literal=rootPassword="cm9vdA==" 
+  
+# kubectl create secret generic mysql-root-password -n default --from-literal=password="cm9vdA=="
 
-print(cluster.status());
+
+# 확인 
+kubectl get secret mysql-root-password -n default -o yaml 
+
+# mycluster.yaml 파일 수정: secretName: mypwds -> secretName: mysql-root-password 로 변경
 ```
 
 
+### c-4. cluster apply 
+delete 
 ```bash
-#다음 mysql-router를 시작하여, 저 클러스터와 연결시킨다. 
-kubectl apply -f ./k8_configs/mysql_router.yaml
+kubectl delete innodbcluster mycluster -n default 
 
-# 먼저 mysql-router 재시작
-kubectl rollout restart deployment mysql-router 
-
-# mysql-router 상태확인
-kubectl get pods | grep mysql-router
-
-
-# 연결 테스트
-
-# 읽기/쓰기 연결 테스트 (Router의 6446 포트)
-# 이 명령은 mysql-router 파드 내부에서 실행하는 것입니다.
-# Router의 6446 포트로 접속하면 현재 PRIMARY 노드(예: mysql-0)로 연결되어야 합니다.
-kubectl exec -it mysql-router-76fdb7c799-6chlq -n default -- mysql -h 127.0.0.1 -P 6446 -u root -proot -e "SELECT @@hostname, @@port;"
-+------------+--------+
-| @@hostname | @@port |
-+------------+--------+
-| mysql-0    |   3306 |
-+------------+--------+
+# 클러스터 Pod들 강제 삭제 (Sts가 다시 살릴 수 있음) 
+kubectl delete pod mycluster-0 mycluster-1 mycluster-2 -n default --force --grace-period=0 
+# StatefulSet 강제 삭제 (이걸 지우면 Pod들 더이상 안 살아남)
+# --cascade=orphan 옵션으로 PVC는 남겨둘 수 있음 
+kubectl delete statefulset mycluster -n default --force --grace-period=0 --cascade=orphan 
 
 
-# 읽기 전용 연결 테스트 (Router의 6447 포트)
-# 이 명령도 mysql-router 파드 내부에서 실행하는 것입니다.
-# Router의 6447 포트로 접속하면 현재 SECONDARY 노드들(예: mysql-1 또는 mysql-2) 중 하나로 연결되어야 합니다.
-kubectl exec -it mysql-router-76fdb7c799-6chlq -n default -- mysql -h 127.0.0.1 -P 6447 -u root -proot -e "SELECT @@hostname, @@port;"
-+------------+--------+
-| @@hostname | @@port |
-+------------+--------+
-| mysql-1    |   3306 |
-+------------+--------+
+kubectl get statefulset -n default -l mysql.oracle.com/cluster=mycluster
+kubectl get service -n default -l mysql.oracle.com/cluster=mycluster
+kubectl get pvc -n default -l mysql.oracle.com/cluster=mycluster 
+
+kubectl delete statefulset <statefulset-이름> -n default --ignore-not-found=true kubectl delete service <service-이름> -n default --ignore-not-found=true # 
+kubectl delete pvc <pvc-이름들> -n default 
+```
+
+apply 
+```bash 
+kubectl apply -f k8_configs/mycluster.yaml
+```
+
+```bash
+# online 상태 될 때 까지 기다리기 
+kubectl get innodbcluster --watch
+
+kubectl get pods -n default -l mysql.oracle.com/cluster=mycluster -w 
+
+kubectl get innodbcluster mycluster -n default -w 
+```
+
+```bash
+kubectl run --rm -it myshell --image=container-registry.oracle.com/mysql/community-operator -- mysqlsh root@mycluster --sql
+
+SQL> SELECT @@hostname 
+```
+
+#### c-4-1. 세부 설정 
+https://dev.mysql.com/doc/mysql-operator/en/mysql-operator-innodbcluster-common.html 
+
+### c-5. connect to cluster 
+```bash 
+kubectl run --rm -it myshell --image=container-registry.oracle.com/mysql/community-operator -- mysqlsh 
+
+\connect root@mycluster 
+
+# root를 base64 인코딩한 값 
+cm9vdA==
+
+# AdminAPI 명령 실행 
+\js 
+cluster = dba.getCluster();
+cluster.status();
+```
+
+### c-6. connect to mysql-0,1,2 pod 개인 
+이렇게 접속하거나, 
+특정 mysql-0,1,2 접속하고 싶다면, 
+```bash 
+kubectl --namespace default exec -it mycluster-0 -- bash 
+
+mysqlsh root@localhost 
+
+# root를 base64 encoding 한 값 
+cm9vdA==
+```
+
+### c-7. 포트포워딩 
+```bash 
+kubectl port-forward service/mycluster 3306 
+
+mysql -h127.0.0.1 -uroot -p 
+
+mysql> select @@hostname; 
+```
+
+```bash
+$> kubectl port-forward service/mycluster mysql 
+
+Forwarding from 127.0.0.1:3306 -> 6446 
+Forwarding from [::1]:3306 -> 6446 
+
+^C 
+
+$> kubectl port-forward service/mycluster mysql-ro 
+
+Forwarding from 127.0.0.1:6447 -> 6447 
+Forwarding from [::1]:6447 -> 6447
+```
+
+```
+mysql: 3306 mysqlx: 33060 mysql-alternate: 6446 mysqlx-alternate: 6448 mysql-ro: 6447 mysqlx-ro: 6449 router-rest: 8443
+```
+
+
+### c-8. router를 통한 r/w test 
+쓰기 테스트 
+```bash 
+# myshell Pod는 종료됐을 테니 다시 run 명령으로 새 Pod 띄워서 테스트
+kubectl run --rm -it myshell-router-test --image=container-registry.oracle.com/mysql/community-operator -- mysqlsh root@mycluster:6446 --sql 
+
+# root를 base64 encoding 한 값 
+cm9vdA==
+```
+
+```sql 
+CREATE DATABASE test_db; 
+USE test_db; 
+CREATE TABLE test_table (id INT PRIMARY KEY);
+
+INSERT INTO test_table (id) VALUES (1); 
+
+SELECT * FROM test_table;
+
+\q
+```
+
+
+읽기 테스트 
+```bash 
+kubectl run --rm -it myshell-router-test --image=container-registry.oracle.com/mysql/community-operator -- mysqlsh root@mycluster:6447 --sql 
+
+# root를 base64 encoding 한 값 
+cm9vdA==
+```
+
+```sql 
+USE test_db; 
+SELECT * FROM test_table;
 ```
 
 
 
-### c-4. 자동 fail over test 
-```bash
+### c-9. mysql-router 
+router를 통해서 cluster에 접속해야 한다 
+(안그럼 brac 정책에 어긋남)
+```bash 
 kubectl get pod 
+kubectl get deployment -n default 
 
-
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST                                      | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| group_replication_applier | 271f6bbf-2e3a-11f0-9866-721273200872 | mysql-0.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
-| group_replication_applier | 2848ce32-2e3a-11f0-91a5-e6cd9afb9529 | mysql-1.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | PRIMARY     | 8.0.37         | XCom                       |
-| group_replication_applier | 2998cdfe-2e3a-11f0-a159-a679022f8238 | mysql-2.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-
-# 이게 맨 처음 상태.
-# mysql-1이 primary, 나머지는 secondary
-
-
-# PRIMARY 노드(mysql-0) 중지 (이 명령어는 주의해서 사용하세요!)
-kubectl delete pod mysql-0 --grace-period=0 --force
-
-
-kubectl get pod 
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST                                      | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| group_replication_applier | 271f6bbf-2e3a-11f0-9866-721273200872 | mysql-0.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
-| group_replication_applier | 2848ce32-2e3a-11f0-91a5-e6cd9afb9529 | mysql-1.mysql-headless.default.svc.cluster.local |        3306 | UNREACHABLE  | PRIMARY     | 8.0.37         | XCom                       |
-| group_replication_applier | 2998cdfe-2e3a-11f0-a159-a679022f8238 | mysql-2.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-
-# mysql-1(primary)가 UNREACHABLE 상태로 되었다. 
-# 좀 기다리다가 primary가 영영 죽은거 같으면, 재투표해서 나머지 SECONDARY 둘 중에 하나가 PRIMARY가 된다.
-
-
-# 잠시 대기 후 연결 테스트
-kubectl exec -it mysql-1 -- mysql -u root -proot -e "SELECT * FROM performance_schema.replication_group_members;"
-
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| CHANNEL_NAME              | MEMBER_ID                            | MEMBER_HOST                                      | MEMBER_PORT | MEMBER_STATE | MEMBER_ROLE | MEMBER_VERSION | MEMBER_COMMUNICATION_STACK |
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-| group_replication_applier | 271f6bbf-2e3a-11f0-9866-721273200872 | mysql-0.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | PRIMARY     | 8.0.37         | XCom                       |
-| group_replication_applier | 2848ce32-2e3a-11f0-91a5-e6cd9afb9529 | mysql-1.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
-| group_replication_applier | 2998cdfe-2e3a-11f0-a159-a679022f8238 | mysql-2.mysql-headless.default.svc.cluster.local |        3306 | ONLINE       | SECONDARY   | 8.0.37         | XCom                       |
-+---------------------------+--------------------------------------+--------------------------------------------------+-------------+--------------+-------------+----------------+----------------------------+
-
-# 재투표 한 뒤, mysql-0이 primary가 되고, 기존에 primary인 mysql-1은 secondary가 되어 cluster에 재합류된걸 확인할 수 있다.
-```
-mysql-1이 새로운 primary로 설정된걸 확인할 수 있다.
-
-
-
-
-
-
-### c-5. fastapi_module에서 mysql 연결할 때는?
-```bash
-# 읽기/쓰기 연결 (PRIMARY)
-jdbc:mysql://mysql-router:6446/your_database
-
-# 읽기 전용 연결 (SECONDARY)
-jdbc:mysql://mysql-router:6447/your_database
+kubectl logs mycluster-router-78d98d674-c5crx 
 ```
 
-이러면 read replica에서도 부하분산 해준다.
+### c-10. fastapi_module에서 mysqcluster과 통신 
+
+### c-11. backup 설정 
+https://dev.mysql.com/doc/mysql-operator/en/mysql-operator-backups.html  
 
 
-### c-번외, node가 2개(primary, secondary)인 경우 
-1. mysql-0 (primary, write)
-2. mysql-1 (secondary, read)
 
-이렇게 두개 생기는데(HA), write_db에 쓴다고 read_db에 sync가 안되기 때문에, 설정을 잡아줘야 sync 한다.
-
-```bash
-kubectl apply -f ./k8_configs/mysql_depl_serv.yaml
-
-kubectl exec -it mysql-0 -- bash
-
-mysql -u root -p
-# 암호 입력 (root)
-
-# step1) primary에서 복제 사용자 생성
-CREATE USER 'replication'@'%' IDENTIFIED BY 'replication';
-GRANT REPLICATION SLAVE ON *.* TO 'replication'@'%';
-FLUSH PRIVILEGES;
-```
-
-mysql-0(primary)에서.. 
-```bash
--- 바이너리 로그 활성화 확인
-SHOW VARIABLES LIKE 'log_bin';
-SHOW VARIABLES LIKE 'server_id';
-
-# step2) mysql-1(primary)에서 File 명이랑 Position 을 복사한다.
--- 현재 바이너리 로그 파일과 위치 확인
-SHOW MASTER STATUS;
-
-+------------------+----------+--------------+------------------+-------------------+
-| File             | Position | Binlog_Do_DB | Binlog_Ignore_DB | Executed_Gtid_Set |
-+------------------+----------+--------------+------------------+-------------------+
-| mysql-bin.000003 |     9276 |              |                  |                   |
-+------------------+----------+--------------+------------------+-------------------+
-1 row in set (0.00 sec)
-
-...에서 mysql-bin.000003 을 복사!
-position 9276도 복사!
-```
-
-
-mysql-1(secondary)에서..
-```bash
-# step3) primary에서 딴 file, log_pos를 입력한다.
--- Primary 연결 설정
-CHANGE MASTER TO
-    MASTER_HOST='mysql-0.mysql-headless',
-    MASTER_USER='replication',
-    MASTER_PASSWORD='replication',
-    MASTER_LOG_FILE='mysql-bin.000003',  -- Primary에서 확인한 값
-    MASTER_LOG_POS=9276;                     -- Primary에서 확인한 값
-
-# step4) 복제 시작하면 master db 테이블에 있던 데이터를 slave db 테이블에 sync한다. (이제부터임. 이전 데이터는 sync 안함)
--- 복제 시작
-START SLAVE;
-
--- 복제 상태 확인
-SHOW SLAVE STATUS\G
-```
-
-## c. test user module
+## d. test user module
 ```bash
 minikube tunnel
 
@@ -372,7 +305,7 @@ curl -X GET http://localhost:8001/api/users/
 ```
 
 
-## d. test product module
+## e. test product module
 ```bash
 ############################################################
 ############################################################
@@ -528,7 +461,7 @@ curl -X PUT http://localhost:8003/api/orders/1/status \
 
 
 
-## f. test category inside product module
+## g. test category inside product module
 ```bash
 ############################################################
 ############################################################
@@ -558,7 +491,7 @@ curl -X GET http://localhost:8002/api/categories/1/
 curl -X GET http://localhost:8002/api/categories/1/subcategories
 ```
 
-## g. payment 모듈 테스트 
+## h. payment 모듈 테스트 
 1. create_order() 하면,
 2. category_product mysql database에 outbox 테이블에 write 되고,
 3. 그걸 debezium이 outbox table 변화를 감지해서 kafka에 'order' 토픽에 'order_created' 이벤트로 메시지를 보내면,
@@ -578,7 +511,7 @@ curl -X GET http://localhost:8004/api/payments/
 ```
 
 
-## h. 각 모듈의 컨테이너에서 다른 모듈의 컨테이너와 통신하기
+## i. 각 모듈의 컨테이너에서 다른 모듈의 컨테이너와 통신하기
 ```bash
 # product pod 이름 가져오기
 POD_NAME=$(kubectl get pod -l app=product-service -o jsonpath="{.items[0].metadata.name}")
@@ -598,7 +531,7 @@ curl http://order-service:8000/
 ```
 
 
-## i. api-gateway
+## j. api-gateway
 ```bash
 minikube tunnel
 
@@ -611,7 +544,7 @@ curl -v -H "Host: my-deployed-app.com" http://localhost:80/api/orders
 ```
 
 
-## j. mongodb stress test 
+## k. mongodb stress test 
 
 ### step1) 디스크 용량 확보 
 ```bash 
@@ -735,7 +668,7 @@ docker run -i --network host --volume $(pwd):/app -w /app grafana/k6 run product
 ```
 
 
-## k. elastic search에 stress test
+## l. elastic search에 stress test
 
 ### step1) kibana 띄우기 
 ```bash
@@ -821,7 +754,7 @@ curl -X GET "localhost:9200/_nodes/stats?pretty"
 ```
 
 
-## l. elastic search 검색 
+## m. elastic search 검색 
 
 ### step1) create fake data & insert into elastic search
 ```bash

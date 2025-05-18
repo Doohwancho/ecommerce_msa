@@ -19,7 +19,7 @@ MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "root")
 # MYSQL_HOST = os.getenv("MYSQL_HOST", "mysql-service")
 # after replica set
 # MySQL Router 
-MYSQL_ROUTER_HOST = os.getenv('MYSQL_ROUTER_HOST', 'mysql-router-access')
+MYSQL_ROUTER_HOST = os.getenv('MYSQL_ROUTER_HOST', 'mycluster')
 MYSQL_ROUTER_RW_PORT = os.getenv('MYSQL_ROUTER_RW_PORT', '6446')
 MYSQL_ROUTER_RO_PORT = os.getenv('MYSQL_ROUTER_RO_PORT', '6447')
 
