@@ -21,3 +21,5 @@ opentelemetry-instrumentation-fastapi==0.42b0
 opentelemetry-instrumentation-grpc==0.42b0 
 opentelemetry-instrumentation-kafka-python==0.42b0 
 opentelemetry-instrumentation-sqlalchemy==0.42b0
+
+opentelemetry-instrumentation-logging 

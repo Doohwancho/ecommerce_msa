@@ -22,3 +22,5 @@ opentelemetry-instrumentation-kafka-python==0.42b0 # kafka-python 클라이언�
 
 # 만약 Payment 모듈이 gRPC 클라이언트로 다른 서비스 호출하면 아래 추가
 # opentelemetry-instrumentation-grpc==0.42b0
+
+opentelemetry-instrumentation-logging 

@@ -32,6 +32,11 @@ log_config = {
             "level": "INFO",
             "propagate": True
         },
+        "": { # Root logger
+            "handlers": ["console"],
+            "level": "INFO", # 기본 레벨 (DEBUG로 하면 OTel 내부 로그까지 다 볼 수 있음)
+            "propagate": False # Root 로거가 다시 상위로 전파할 필요는 없다
+        }
     }
 }
 
@@ -40,4 +45,4 @@ dictConfig(log_config)
 logger = logging.getLogger("app")
 
 # hostname 추가
-# logger = logging.LoggerAdapter(logger, {'hostname': socket.gethostname()})
+logger = logging.LoggerAdapter(logger, {'hostname': socket.gethostname()})
