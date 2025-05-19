@@ -7,53 +7,103 @@ spec:
   template:
     spec:
       restartPolicy: OnFailure
+      volumes:
+        - name: mysql-root-password-secret
+          secret:
+            secretName: mysql-root-password 
+            # key: rootPassword 
       containers:
         - name: register-connector
-          image: curlimages/curl
+          image: curlimages/curl 
           command:
             - /bin/sh
             - -c
             - |
+              echo "--- Debezium Connector Registration Script Starting ---"
+
               # Debezium Connect가 뜰 때까지 대기
               until curl -s http://debezium-connect:8083/connectors > /dev/null; do
                 echo "Waiting for Debezium Connect to be ready..."
                 sleep 5
               done
 
-              # Connector 등록
-              curl -X POST -H "Content-Type: application/json" \
-                -d '{
-                  "name": "outbox-connector",
-                  "config": {
-                    "connector.class": "io.debezium.connector.mysql.MySqlConnector",
-                    "database.hostname": "mysql-service",
-                    "database.port": "3306",
-                    "database.user": "root",
-                    "database.password": "root",
-                    "database.server.id": "184054",
-                    "topic.prefix": "dbserver",
+              echo "Debezium Connect is ready."
 
-                    "database.server.name": "dbserver",
-                    "database.include.list": "product_category",
-                    "table.include.list": "product_category.outbox",
-                    "schema.history.internal.kafka.bootstrap.servers": "kafka-service:9092",
-                    "schema.history.internal.kafka.topic": "schema-changes.outbox",
+              MYSQL_ROOT_PASSWORD=$(cat /mnt/secrets/rootPassword/rootPassword) 
 
-                    "transforms": "outbox",
-                    "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
-                    "transforms.outbox.route.by.field": "aggregatetype",
-                    "transforms.outbox.route.topic.replacement": "${routedByValue}",
-                    "transforms.outbox.table.field.event.payload": "payload",
-                    "transforms.outbox.table.fields.additional.placement": "type:header:eventType",
-                    "transforms.outbox.route.key.field": "aggregateid",
+              echo "MySQL password read, length: ${#MYSQL_ROOT_PASSWORD}"
+              
+              CONNECTOR_CONFIG_JSON=$(cat <<EOF
+              {
+                "name": "outbox-connector",
+                "config": {
+                  "connector.class": "io.debezium.connector.mysql.MySqlConnector",
+                  "database.hostname": "mycluster.default.svc.cluster.local",
+                  "database.port": "3306",
+                  "database.user": "root",
+                  "database.password": "${MYSQL_ROOT_PASSWORD}", 
+                  "database.server.id": "184054", 
+                  "topic.prefix": "dbserver", 
 
-                    "errors.tolerance": "all",
-                    "errors.log.enable": true,
-                    "errors.log.include.messages": true,
-                    "errors.deadletterqueue.topic.name": "outbox-dlq",
-                    "errors.deadletterqueue.context.headers.enable": true,
-                    "max.retries": 3,
-                    "retry.backoff.ms": 1000
-                  }
-                }' \
-                http://debezium-connect:8083/connectors
+                  "database.server.name": "dbserver", 
+                  "database.include.list": "product_category", 
+                  "table.include.list": "product_category.outbox", 
+                  "schema.history.internal.kafka.bootstrap.servers": "kafka-service:9092", 
+                  "schema.history.internal.kafka.topic": "schema-changes.outbox", 
+
+                  "transforms": "outbox", 
+                  "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter", 
+                  "transforms.outbox.route.by.field": "aggregatetype", 
+                  "transforms.outbox.route.topic.replacement": "\${routedByValue}", 
+                  "transforms.outbox.table.field.event.payload": "payload", 
+                  "transforms.outbox.table.fields.additional.placement": "type:header:eventType", 
+                  "transforms.outbox.route.key.field": "aggregateid", 
+
+                  "errors.tolerance": "all", 
+                  "errors.log.enable": true,
+                  "errors.log.include.messages": true,
+                  "errors.deadletterqueue.topic.name": "outbox-dlq", 
+                  "errors.deadletterqueue.context.headers.enable": true,
+                  "max.retries": 3,
+                  "retry.backoff.ms": 1000,
+
+                  "snapshot.mode": "never"
+                }
+              }
+              EOF
+              )
+
+              # 디버그: 완성된 JSON payload 출력
+              echo "--- JSON Payload ---"
+              echo "$CONNECTOR_CONFIG_JSON"
+              echo "--- End JSON Payload ---"
+
+              # !!! JSON payload를 파이프로 curl의 표준 입력(-d @-)으로 전달 !!!
+              echo "Executing curl command string (using pipe):"
+              echo "$CONNECTOR_CONFIG_JSON" | printf 'curl -X POST -H "Content-Type: application/json" -d @- %s\n' "http://debezium-connect:8083/connectors"
+
+              # 최종 curl 명령 실행 (파이프 사용)
+              echo "Executing curl command:"
+              echo "$CONNECTOR_CONFIG_JSON" | curl -X POST -H "Content-Type: application/json" -d @- http://debezium-connect:8083/connectors
+
+              # curl 명령의 종료 상태 확인 (선택 사항, 에러 디버깅에 도움)
+              CURL_STATUS=$?
+              if [ "$CURL_STATUS" -ne 0 ]; then
+                echo "Curl command failed with status: $CURL_STATUS"
+                exit $CURL_STATUS # Job 실패로 표시
+              fi
+
+              # 최종 curl 명령 실행
+              # echo "Executing curl command:"
+              # curl -X POST -H "Content-Type: application/json" \
+              #   -d "$CONNECTOR_CONFIG_JSON" \ 
+              #   http://debezium-connect:8083/connectors
+
+              # 디버그: 스크립트 종료 알림
+              echo "--- Script Finished ---"
+
+          volumeMounts:
+            - name: mysql-root-password-secret
+              mountPath: "/mnt/secrets/rootPassword" 
+              readOnly: true
+              # subPath: rootPassword 
