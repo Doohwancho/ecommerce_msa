@@ -5,7 +5,7 @@ metadata:
   labels:
     app: product-service
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: product-service
@@ -77,7 +77,7 @@ spec:
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "http://otel-collector:4317"
             - name: OTEL_SERVICE_NAME
-              value: "fastapi-user-service"
+              value: "fastapi-product-service"
             - name: OTEL_TRACES_SAMPLER
               value: "always_on"
             - name: OTEL_METRICS_EXPORTER
