@@ -84,7 +84,7 @@ class PaymentService:
                     currency=payment_data.currency,
                     payment_method=payment_data.payment_method,
                     payment_status=PaymentStatus.PENDING,
-                    stock_reserved=payment_data.stock_reserved
+                    # stock_reserved=payment_data.stock_reserved
                 )
                 self.write_db.add(payment)
                 await self.write_db.flush()  # payment_id를 얻기 위해 flush
