@@ -26,8 +26,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class OrderManager:
-    def __init__(self):
-        self.write_db = None
+    def __init__(self, session=None):
+        self.write_db = session
         self.read_db = None
         self.kafka_consumer = OrderKafkaConsumer(
             bootstrap_servers=os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka-service:9092'),
