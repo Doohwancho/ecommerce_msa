@@ -123,8 +123,9 @@ async def test_connections():
 
 @app.get("/")
 def read_root():
-    logger.info("Root endpoint called")
-    return {"message": "Welcome to the User Service API"}
+    with tracer.start_as_current_span("endpoint.read_root"): # Add span for consistency
+        logger.info("Root endpoint called")
+        return {"message": "Welcome to the User Service API"}
 
 if __name__ == "__main__":
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, log_level="info")
