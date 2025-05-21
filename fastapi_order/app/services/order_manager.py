@@ -5,608 +5,654 @@ from app.models.order import Order, OrderItem, OrderStatus
 from app.models.outbox import Outbox
 from app.models.failed_event import FailedEvent
 from app.schemas.order import OrderCreate, OrderItemCreate, OrderUpdate
-from app.grpc.product_client import ProductClient
-from app.grpc.user_client import UserClient
-from fastapi import HTTPException, BackgroundTasks
+from app.grpc.product_client import ProductClient # GrpcInstrumentorClient가 자동 계측 가정
+from app.grpc.user_client import UserClient # GrpcInstrumentorClient가 자동 계측 가정
+from fastapi import HTTPException # BackgroundTasks는 현재 사용되지 않음
 import asyncio
 import logging
 import datetime
 import json
 from typing import Optional
 import uuid
-from sqlalchemy.orm import Session
-from sqlalchemy.exc import SQLAlchemyError
-from app.config.database import WriteSessionLocal, ReadSessionLocal
+# from sqlalchemy.orm import Session # 비동기 코드에서는 사용되지 않음
+# from sqlalchemy.exc import SQLAlchemyError # SQLAlchemyInstrumentor가 오류 처리 도움
+from app.config.database import WriteSessionLocal, ReadSessionLocal # SQLAlchemyInstrumentor가 자동 계측 가정
 import os
 
+# OpenTelemetry API 임포트
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+from opentelemetry.semconv.trace import SpanAttributes # 시맨틱 컨벤션
+
 # 로깅 설정
-logging.basicConfig(level=logging.INFO)
+# logging.basicConfig(level=logging.INFO) # main 또는 설정 파일에서 한 번만 호출 권장
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer(__name__) # 모듈 수준 트레이서
 
 class OrderManager:
-    def __init__(self, session=None):
-        self.write_db = session
-        self.read_db = None
+    def __init__(self, session: Optional[AsyncSession] = None): # 명시적으로 AsyncSession 타입 힌트
+        # 외부에서 세션을 주입받는 경우 해당 세션을 사용, 아니면 내부적으로 생성
+        self.write_db_session_provided = session is not None
+        self.current_write_db_session = session # 주입된 쓰기 세션
+        self.current_read_db_session: Optional[AsyncSession] = None # 읽기 세션은 필요시 생성
+
         self.user_client = UserClient()
         self.product_client = ProductClient()
         self.max_retries = 3
         self.retry_delay = 1  # seconds
     
-    async def _get_write_db(self):
-        if self.write_db is None:
-            self.write_db = WriteSessionLocal()
-            if self.write_db is None:
+    async def _get_write_db(self) -> AsyncSession:
+        """쓰기 전용 DB 세션을 가져오거나 생성합니다."""
+        # 이 메서드 자체의 스팬은 매우 짧으므로 생략 가능. DB 작업은 SQLAlchemyInstrumentor가 계측.
+        if self.current_write_db_session is None:
+            self.current_write_db_session = WriteSessionLocal()
+            if self.current_write_db_session is None: # WriteSessionLocal()이 None을 반환하는 경우는 거의 없음
+                logger.error("Failed to create MySQL primary connection session.")
                 raise Exception("MySQL primary connection failed")
-        return self.write_db
-    
-    async def _get_read_db(self):
-        if self.read_db is None:
-            self.read_db = ReadSessionLocal()
-            if self.read_db is None:
+        return self.current_write_db_session
+
+    async def _get_read_db(self) -> AsyncSession:
+        """읽기 전용 DB 세션을 가져오거나 생성합니다."""
+        if self.current_read_db_session is None:
+            self.current_read_db_session = ReadSessionLocal()
+            if self.current_read_db_session is None:
+                logger.error("Failed to create MySQL secondary connection session.")
                 raise Exception("MySQL secondary connection failed")
-        return self.read_db
+        return self.current_read_db_session
 
     async def _store_failed_event(self, event_type: str, event_data: dict, error: str) -> None:
-        """Store failed event in database"""
-        try:
-            # 이벤트 데이터를 JSON 문자열로 변환
-            event_data_json = json.dumps(event_data)
-            
-            failed_event = FailedEvent(
-                event_type=event_type,
-                event_data=event_data_json,  # JSON 문자열로 저장
-                error_message=error,
-                status='pending'
-            )
-            db = await self._get_write_db()  # Write DB 사용
-            db.add(failed_event)
-            await db.commit()
-            logger.info(f"Stored failed event in database: {error}")
-        except Exception as e:
-            logger.critical(f"Failed to store event in database: {str(e)}")
-            # If database storage fails, we're in a critical situation
-            # Log the event details for manual recovery
-            logger.critical(f"Critical event loss - Event type: {event_type}, Data: {json.dumps(event_data)}")
-
-    # async def _publish_to_dlq(self, event: dict, error: str) -> None:
-    #     """Publish failed event to Dead Letter Queue"""
-    #     try:
-    #         dlq_event = {
-    #             'original_event': event,
-    #             'error': error,
-    #             'timestamp': datetime.datetime.utcnow().isoformat(),
-    #             'retry_count': 0  # Initial retry count
-    #         }
-    #         self.kafka_producer.send(ORDER_DLQ_TOPIC, dlq_event)
-    #         self.kafka_producer.flush()
-    #         logger.info(f"Published failed event to DLQ: {error}")
-    #     except Exception as e:
-    #         logger.error(f"Failed to publish to DLQ: {str(e)}")
-    #         # If DLQ publishing fails, store in database
-    #         await self._store_failed_event('order_created', event, f"DLQ Error: {str(e)}")
-
-    # async def _publish_kafka_event(self, topic: str, event: dict) -> None:
-    #     """Publish event to Kafka in background"""
-    #     try:
-    #         # feat: 중복 방지
-    #         # order_id를 키로 사용해서 보내기
-    #         # 같은 order_id를 가진 메시지는 같은 파티션으로 가게 됨
-    #         # Consumer에서 order_id로 중복 체크하기 쉬워짐
-    #         # 메시지 순서도 보장됨 (같은 키는 같은 파티션으로 가니까)
-    #         # 근데 이건 완벽한 중복 방지는 아님 (네트워크 문제로 재시도하면 여전히 중복 가능)
-    #         # 그렇기 때문에 카프카 설정에 Idempotent 설정을 해줌 
-    #         self.kafka_producer.send(
-    #             topic,
-    #             key=str(event['order_id']).encode('utf-8'),  # 키로 order_id 사용
-    #             value=event
-    #         )
-    #         self.kafka_producer.flush()
-    #         logger.info(f"Successfully published event to Kafka topic: {topic}")
-    #     except KafkaError as e:
-    #         logger.error(f"Failed to publish event to Kafka: {str(e)}")
-    #         # Try to publish to DLQ
-    #         await self._publish_to_dlq(event, str(e))
-
-    # ver1) 주문 후 kafka.send() 호출 + error handling(retry + DLQ + write on DB)
-    # async def create_order(self, order_data: OrderCreate, background_tasks: BackgroundTasks):
-    #     logger.info("Creating a new order")
-    #     # step1) 사용자 존재 확인
-    #     user = await self.user_client.get_user(order_data.user_id)
-    #     if not user:
-    #         raise HTTPException(status_code=404, detail="User not found")
- 
-    #     # step2) Create order
-    #     order = Order(
-    #         user_id=order_data.user_id,
-    #         status=OrderStatus.PENDING,
-    #         total_amount=0.0,
-    #         created_at=datetime.datetime.utcnow(),
-    #         updated_at=datetime.datetime.utcnow()
-    #     )
-    #     self.session.add(order)
-    #     await self.session.flush()
-
-    #     # step3) 주문 아이템 생성
-    #     total_amount = 0.0
-    #     order_items = []
-    #     for item_data in order_data.items:
-    #         # Check product availability and get product details in one call
-    #         is_available, product = await self.product_client.check_availability(
-    #             item_data.product_id,
-    #             item_data.quantity
-    #         )
-    #         if not is_available:
-    #             raise ValueError(f"Product {item_data.product_id} is not available")
-
-    #         # Create order item
-    #         order_item = OrderItem(
-    #             order_id=order.order_id,
-    #             product_id=item_data.product_id,
-    #             quantity=item_data.quantity,
-    #             price_at_order=product.price,
-    #             created_at=datetime.datetime.utcnow()
-    #         )
-    #         self.session.add(order_item)
-    #         total_amount += product.price * item_data.quantity
-    #         order_items.append({
-    #             'product_id': item_data.product_id,
-    #             'quantity': item_data.quantity,
-    #             'price': product.price
-    #         })
-
-    #     order.total_amount = total_amount
-    #     await self.session.commit()
-    #     logger.info(f"Order {order.order_id} created successfully")
-
-    #     # step4) 주문 생성 이벤트 발행
-    #     # Prepare order created event
-    #     order_created_event = {
-    #         'order_id': order.order_id,
-    #         'user_id': order.user_id,
-    #         'total_amount': order.total_amount,
-    #         'status': order.status.value,
-    #         'items': order_items,
-    #         'created_at': order.created_at.isoformat()
-    #     }
-        
-    #     # step5) 주문 생성 이벤트 발행
-    #     # Add Kafka event publishing to background tasks
-    #     background_tasks.add_task(
-    #         self._publish_kafka_event,
-    #         ORDER_CREATED_TOPIC,
-    #         order_created_event
-    #     )
-
-    #     # step6) 주문 생성 이벤트 발행
-    #     # Refresh the order and load its items
-    #     await self.session.refresh(order)
-    #     # Load the items relationship
-    #     query = (
-    #         select(Order)
-    #         .options(selectinload(Order.items))
-    #         .where(Order.order_id == order.order_id)
-    #     )
-    #     result = await self.session.execute(query)
-    #     loaded_order = result.scalar_one()
-        
-    #     return loaded_order
-
-    # ver2) outbox pattern
-    async def create_order(self, order_data: OrderCreate):
-        logger.info("Creating a new order")
-        
-        # 예약된 재고를 추적하기 위한 목록
-        reserved_items = []
-
-        try:
-            # step1) 사용자 존재 확인
+        """실패한 이벤트를 데이터베이스에 저장합니다."""
+        with tracer.start_as_current_span("OrderManager._store_failed_event") as span:
+            span.set_attribute("app.event.type", event_type)
+            span.set_attribute("app.error.message", error[:1024]) # 오류 메시지 길이 제한
             try:
-                user = await self.user_client.get_user(order_data.user_id)
-                if not user:
-                    raise HTTPException(status_code=404, detail=f"User {order_data.user_id} not found")
+                event_data_json = json.dumps(event_data)
+                span.set_attribute("app.event.data_size", len(event_data_json))
+                
+                failed_event = FailedEvent(
+                    event_type=event_type,
+                    event_data=event_data_json,
+                    error_message=error,
+                    status='pending'
+                )
+                db = await self._get_write_db()
+                db.add(failed_event)
+                await db.commit() # SQLAlchemyInstrumentor가 이 DB 작업 계측
+                logger.info(f"Stored failed event in database: type={event_type}, error={error}")
+                span.set_status(Status(StatusCode.OK))
             except Exception as e:
-                logger.error(f"Error validating user: {str(e)}")
-                raise HTTPException(status_code=400, detail=f"Invalid user ID or user not found: {str(e)}")
+                logger.critical(f"Failed to store event in database: {str(e)}", exc_info=True)
+                logger.critical(f"Critical event loss - Type: {event_type}, Data: {json.dumps(event_data)}, OriginalError: {error}")
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, "Failed to store event in DB"))
+                # 여기서 예외를 다시 발생시키지 않으면 실패 이벤트 저장 실패가 호출자에게 알려지지 않음
+
+    async def create_order(self, order_data: OrderCreate):
+        """새로운 주문을 생성하고 Outbox 이벤트를 기록합니다 (Outbox 패턴 ver2)."""
+        with tracer.start_as_current_span("OrderManager.create_order") as span:
+            span.set_attribute("app.user_id", order_data.user_id)
+            span.set_attribute("app.item_count", len(order_data.items))
+            logger.info(f"Creating a new order for user_id: {order_data.user_id}")
             
-            # step2) 상품 가용성 체크와 가격 계산 (트랜잭션 밖에서)
-            total_amount = 0.0
-            order_items = []
-            products = {}  # product_id -> product 정보 캐싱
-            
-            for item_data in order_data.items:
-                # 재고 확인 및 예약을 한 번에 처리
-                success, message = await self.product_client.check_and_reserve_inventory(
-                    item_data.product_id,
-                    item_data.quantity
-                )
-                
-                if not success:
-                    # 에러 메시지 반환
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Failed to reserve product {item_data.product_id}: {message}"
-                    )
-                # 성공적으로 예약된 항목 추적
-                reserved_items.append((item_data.product_id, item_data.quantity))
-                
-                # 제품 정보 가져오기 (가격 계산을 위해)
-                product = await self.product_client.get_product(item_data.product_id)
-                inventory = await self.product_client.get_product_inventory(item_data.product_id)
-                products[item_data.product_id] = {
-                    'product': product,
-                    'inventory': inventory
-                }
+            reserved_items = []
 
-                total_amount += product.price * item_data.quantity
-                order_items.append({
-                    'product_id': item_data.product_id,
-                    'quantity': item_data.quantity,
-                    'price': product.price
-                })
-
-            # step3) 트랜잭션 시작
-            db = await self._get_write_db()  # Write DB 사용
-            async with db.begin():
-                # Create order
-                order = Order(
-                    user_id=order_data.user_id,
-                    status=OrderStatus.PENDING,
-                    total_amount=total_amount,
-                    created_at=datetime.datetime.utcnow(),
-                    updated_at=datetime.datetime.utcnow()
-                )
-                db.add(order)
-                await db.flush()
-
-                # Create order items
-                for item_data in order_data.items:
-                    product_info = products[item_data.product_id]  # 캐시된 product 정보 사용
-                    order_item = OrderItem(
-                        order_id=order.order_id,
-                        product_id=item_data.product_id,
-                        quantity=item_data.quantity,
-                        price_at_order=product_info['product'].price,  # product의 price 사용
-                        created_at=datetime.datetime.utcnow()
-                    )
-                    db.add(order_item)
-
-                # Create outbox event for Debezium CDC
-                order_created_event = {
-                    'type': "order_created",
-                    'order_id': str(order.order_id),
-                    'user_id': order.user_id,
-                    'total_amount': total_amount,
-                    'status': OrderStatus.PENDING.value,
-                    'items': order_items,
-                    'created_at': datetime.datetime.utcnow().isoformat()
-                }
-
-                outbox_event = Outbox(
-                    id=str(uuid.uuid4()),
-                    aggregatetype="order",  # Debezium이 필요로 하는 필드. 이게 kafka에서 토픽 값. subscriber는 토픽으로 구독하거나, 밑에 이벤트 타입으로 구독할 수도 있음. 
-                    aggregateid=str(order.order_id),  # Debezium이 필요로 하는 필드: 해당 aggregate의 ID
-                    type="order_created",  # 이벤트 타입, kafka에서는 메시지 헤더의 eventType 값. ex. order_updated, order_created, order_deleted
-                    payload=order_created_event  # 이벤트 데이터
-                )
-                db.add(outbox_event)
-
-                await db.commit()
-                logger.info(f"Order {order.order_id} created successfully with outbox event")
-
-            return {
-                "order_id": order.order_id,
-                "status": "success",
-                "message": "Order created successfully"
-            }
-
-        except Exception as e:
-            logger.error(f"Failed to create order: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to create order: {str(e)}"
-            )    
-
-    async def handle_payment_failed(self, event_data):
-        """Payment 실패 이벤트 처리 핸들러"""
-        logger.info(f"Received payment_failed event: {event_data}")
-        original_event_data = event_data  # 원본 데이터 보존
-
-        order_id = None
-        items = []
-
-        try:
-            # event_data 파싱
-            if isinstance(event_data, str):
-                try:
-                    event_data = json.loads(event_data)
-                except json.JSONDecodeError:
-                    logger.error(f"Failed to parse payment_failed event (string): {event_data}")
-                    return
-
-            if not isinstance(event_data, dict):
-                logger.error(f"Invalid event_data type: {type(event_data)}")
-                return
-
-            # Debezium 메시지 처리
-            if 'payload' in event_data:
-                payload = event_data['payload']
-                if isinstance(payload, str):
-                    try:
-                        payload = json.loads(payload)
-                        event_data = payload
-                    except json.JSONDecodeError:
-                        logger.error(f"Failed to parse payload as JSON: {payload}")
-                        return
-                else:
-                    event_data = payload
-
-            logger.debug(f"Processed event data: {event_data}")
-
-            order_id = event_data.get('order_id')
-            items = event_data.get('items', [])
-
-            if not order_id:
-                logger.error(f"No order_id in payment_failed event: {event_data}")
-                return
-
-            # 트랜잭션 및 DB 처리 (내부 try~except)
             try:
-                db = await self._get_write_db()  # Write DB 사용
-                async with db.begin():
-                    # 1. 주문 조회
-                    query = (
-                        select(Order)
-                        .options(selectinload(Order.items))
-                        .where(Order.order_id == int(order_id))
-                    )
-                    result = await db.execute(query)
-                    order = result.scalar_one_or_none()
+                # Step 1: 사용자 존재 확인 (gRPC 호출)
+                span.add_event("ValidatingUser")
+                try:
+                    logger.info(f"Validating user {order_data.user_id} via gRPC")
+                    user = await self.user_client.get_user(order_data.user_id) # 자동 계측 (GrpcInstrumentorClient)
+                    if not user:
+                        logger.error(f"User {order_data.user_id} not found")
+                        span.set_attribute("app.validation.error", "UserNotFound")
+                        raise HTTPException(status_code=404, detail=f"User {order_data.user_id} not found")
+                    logger.info(f"User {order_data.user_id} validated successfully")
+                    span.add_event("UserValidated", {"user_id": order_data.user_id})
+                except Exception as e:
+                    logger.error(f"Error validating user {order_data.user_id}: {str(e)}", exc_info=True)
+                    span.record_exception(e)
+                    span.set_attribute("app.validation.error", "UserClientError")
+                    raise HTTPException(status_code=400, detail=f"Invalid user ID or user service error: {str(e)}")
 
-                    if not order:
-                        logger.error(f"Order {order_id} not found")
-                        return
+                # Step 2: 상품 가용성 체크, 예약 및 가격 계산 (gRPC 호출)
+                total_amount = 0.0
+                order_items_payload = [] # outbox 페이로드용
+                products_info_cache = {}
 
-                    # 2. 주문 상태 변경
-                    order.status = OrderStatus.CANCELLED
-                    order.updated_at = datetime.datetime.utcnow()
+                for item_idx, item_data in enumerate(order_data.items):
+                    with tracer.start_as_current_span(f"OrderManager.create_order.process_item_{item_idx}") as item_span:
+                        item_span.set_attribute("app.product_id", item_data.product_id)
+                        item_span.set_attribute("app.quantity", item_data.quantity)
+                        
+                        logger.info(f"Processing item {item_idx + 1}/{len(order_data.items)}: product_id={item_data.product_id}, quantity={item_data.quantity}")
+                        
+                        item_span.add_event("ReservingInventory")
+                        # 재고 확인 및 예약 (gRPC)
+                        logger.info(f"Checking and reserving inventory for product {item_data.product_id}")
+                        success, message = await self.product_client.check_and_reserve_inventory(
+                            item_data.product_id, item_data.quantity
+                        ) # 자동 계측
+                        if not success:
+                            logger.error(f"Failed to reserve inventory for product {item_data.product_id}: {message}")
+                            item_span.set_attribute("app.inventory.error", message)
+                            item_span.set_status(Status(StatusCode.ERROR, "InventoryReservationFailed"))
+                            # 예약 실패 시 이미 예약된 다른 상품들의 예약 취소 로직 필요 (SAGA 패턴의 일부)
+                            # 현재 코드에는 없으므로 예외 발생으로 전체 롤백 유도
+                            raise HTTPException(status_code=400, detail=f"Failed to reserve product {item_data.product_id}: {message}")
+                        logger.info(f"Successfully reserved inventory for product {item_data.product_id}")
+                        reserved_items.append((item_data.product_id, item_data.quantity))
+                        item_span.add_event("InventoryReserved")
 
-                    # 3. 이벤트 발행
-                    order_items = []
-                    for item in order.items:
-                        order_items.append({
-                            'product_id': item.product_id,
-                            'quantity': item.quantity,
-                            'price': item.price_at_order
+                        # 제품 정보 가져오기 (gRPC)
+                        item_span.add_event("FetchingProductDetails")
+                        logger.info(f"Fetching product details for {item_data.product_id}")
+                        product = await self.product_client.get_product(item_data.product_id) # 자동 계측
+                        if not product:
+                            logger.error(f"Product {item_data.product_id} not found")
+                            raise HTTPException(status_code=404, detail=f"Product {item_data.product_id} not found")
+                        logger.info(f"Successfully fetched product details for {item_data.product_id}")
+                        # inventory = await self.product_client.get_product_inventory(item_data.product_id) # 필요시
+                        products_info_cache[item_data.product_id] = {'product': product}
+                        item_span.add_event("ProductDetailsFetched", {"price": product.price})
+
+                        total_amount += product.price * item_data.quantity
+                        order_items_payload.append({
+                            'product_id': item_data.product_id,
+                            'quantity': item_data.quantity,
+                            'price': product.price
                         })
+                        item_span.set_status(Status(StatusCode.OK))
+                
+                span.set_attribute("app.order.calculated_total_amount", total_amount)
+                logger.info(f"Total order amount calculated: {total_amount}")
 
-                    order_failed_event = {
-                        'type': "order_failed",
+                # Step 3: 트랜잭션 시작 및 DB 작업 (Order, OrderItem, Outbox 생성)
+                db = await self._get_write_db() # SQLAlchemyInstrumentor가 DB 작업 계측
+                async with db.begin():
+                    span.add_event("DatabaseTransactionStarted")
+                    logger.info("Starting database transaction")
+                    # Order 생성
+                    order = Order(
+                        user_id=order_data.user_id,
+                        status=OrderStatus.PENDING,
+                        total_amount=total_amount,
+                        # created_at, updated_at은 DB model에서 default 설정 가능
+                    )
+                    db.add(order)
+                    await db.flush() # order_id를 얻기 위해 flush
+                    logger.info(f"Order record created with ID: {order.order_id}")
+                    span.set_attribute("app.order_id", str(order.order_id))
+                    span.add_event("OrderRecordFlushed", {"order.id_assigned": str(order.order_id)})
+
+                    # OrderItem 생성
+                    for item_data in order_data.items:
+                        product_info = products_info_cache[item_data.product_id]
+                        order_item = OrderItem(
+                            order_id=order.order_id,
+                            product_id=item_data.product_id,
+                            quantity=item_data.quantity,
+                            price_at_order=product_info['product'].price
+                        )
+                        db.add(order_item)
+                        logger.info(f"Order item created for product {item_data.product_id}")
+                    
+                    # Outbox 이벤트 생성
+                    order_created_event_payload = {
+                        'type': "order_created", # 이벤트 타입
                         'order_id': str(order.order_id),
                         'user_id': order.user_id,
-                        'status': OrderStatus.CANCELLED.value,
-                        'reason': 'Payment failed',
-                        'items': order_items,
-                        'created_at': datetime.datetime.utcnow().isoformat()
+                        'total_amount': total_amount,
+                        'status': OrderStatus.PENDING.value,
+                        'items': order_items_payload,
+                        'created_at': datetime.datetime.utcnow().isoformat() # 일관성을 위해 order.created_at 사용 고려
                     }
-
                     outbox_event = Outbox(
                         id=str(uuid.uuid4()),
                         aggregatetype="order",
                         aggregateid=str(order.order_id),
-                        type="order_failed",
-                        payload=order_failed_event
+                        type="order_created", # Kafka 메시지 헤더의 eventType으로 사용될 수 있음
+                        payload=order_created_event_payload 
                     )
                     db.add(outbox_event)
+                    logger.info(f"Outbox event created for order {order.order_id}")
+                    span.add_event("OutboxEventPrepared", {"outbox.event.type": "order_created"})
 
-                logger.info(f"Successfully rolled back order {order_id} due to payment failure")
-
-            except Exception as e:
-                logger.error(f"Failed to update order for payment_failed event: {str(e)}")
-                if db.is_active:
-                    await db.rollback()
-                await self._store_failed_event('payment_failed_processing', {'order_id': order_id, 'items': items}, str(e))
-
-        except Exception as e:
-            logger.error(f"Failed to handle payment_failed event: {str(e)}")
-            await self._store_failed_event('payment_failed_parsing', original_event_data, str(e))
-
-    async def handle_payment_success(self, event_data):
-        original_event_data = event_data  # 원본 데이터 보존
-        retry_count = 0
-
-        try:
-            logger.info(f"Processing payment_success event data: {event_data}")
-         
-            # payment_success 구조에서 필요한 필드 추출
-            order_id = event_data.get('order_id')
-            payment_id = event_data.get('payment_id')
-            amount = event_data.get('amount')
-            payment_method = event_data.get('payment_method', 'unknown')
-            payment_status = event_data.get('payment_status', '')
-            
-            if not order_id:
-                logger.error(f"No order_id in payment_success event: {event_data}")
-                await self._store_failed_event('payment_success', event_data, "Missing order_id")
-                return
-
-            if payment_status in ['failed', 'cancelled']:
-                logger.warning(f"Received payment_success event with conflicting status {payment_status} for order {order_id}")
-                return
-
-            logger.info(f"Processing payment success for order_id: {order_id}, payment_id: {payment_id}, amount: {amount}")
-
-
-            while retry_count < self.max_retries:
-                try:
-                    # 트랜잭션 시작
-                    db = await self._get_write_db()  # Write DB 사용
-                    async with db.begin():
-                        # 1. 주문 조회
-                        query = (
-                            select(Order)
-                            .options(selectinload(Order.items))
-                            .where(Order.order_id == int(order_id))
-                        )
-                        result = await db.execute(query)
-                        order = result.scalar_one_or_none()
-                        
-                        if not order:
-                            raise ValueError(f"Order {order_id} not found")
-                        
-                        # 2. 주문 상태 업데이트
-                        order.status = OrderStatus.COMPLETED
-                        order.updated_at = datetime.datetime.utcnow()
-                        
-                        # 3. order_success 이벤트 생성 - 실제 주문 아이템 정보 사용
-                        # payment_success 이벤트에는 items가 없으므로 주문에서 직접 가져옴
-                        order_items = []
-                        for item in order.items:
-                            order_items.append({
-                                'product_id': item.product_id,
-                                'quantity': item.quantity,
-                                'price': item.price_at_order
-                            })
-                        
-                        order_success_event = {
-                            'type': "order_success",
-                            'order_id': str(order.order_id),
-                            'user_id': order.user_id,
-                            'status': OrderStatus.COMPLETED.value,
-                            'items': order_items,
-                            'payment_id': payment_id,
-                            'amount': amount,
-                            'payment_method': payment_method,
-                            'payment_status': 'completed',  # 명시적으로 payment_status 추가
-                            'created_at': datetime.datetime.utcnow().isoformat()
-                        }
-                        
-                        # 4. Outbox에 이벤트 저장 - order_success 토픽 사용
-                        outbox_event = Outbox(
-                            id=str(uuid.uuid4()),
-                            aggregatetype="order",
-                            aggregateid=str(order.order_id),
-                            type="order_success",
-                            payload=order_success_event
-                        )
-                        db.add(outbox_event)
-                        
-                        logger.info(f"Order {order_id} status updated to COMPLETED and order_success event created")
-                    
-                    # 성공적으로 처리됨
-                    logger.info(f"Successfully processed payment_success for order {order_id}")
-                    return
-                    
-                except Exception as e:
-                    retry_count += 1
-                    logger.error(f"Error processing payment success event (attempt {retry_count}/{self.max_retries}): {str(e)}")
-                    
-                    if retry_count < self.max_retries:
-                        await asyncio.sleep(2 ** retry_count)
-                    else:
-                        logger.error(f"Failed to process payment success event after {self.max_retries} attempts")
-                        
-                        # 보상 트랜잭션 시작
-                        await self.create_compensation_event(event_data)
-
-            # 모든 재시도 실패
-            logger.error(f"All retries failed for payment_success event: {event_data}")
-
-        except Exception as e:
-            # 외부 try 블록에 대한 예외 처리 (파싱 및 데이터 검증 과정에서 발생한 예외)
-            logger.error(f"Error handling payment_success event: {str(e)}")
-            await self._store_failed_event('payment_success', original_event_data, str(e))
-    
-    async def create_compensation_event(self, original_event: dict):
-        """Outbox 패턴을 사용하여 보상 이벤트 생성"""
-        try:
-            db = await self._get_write_db()  # Write DB 사용
-            async with db.begin():
-                order_id = original_event.get('order_id')
-                logger.info(f"Creating compensation event for failed order update of order {order_id}")
-                
-                compensation_event = {
-                    'type': "order_update_failed",
-                    'order_id': order_id,
-                    'reason': 'Failed to update order status after payment success',
-                    'timestamp': datetime.datetime.utcnow().isoformat()
+                    # await db.commit() # async with db.begin() 사용 시 자동 커밋/롤백
+                span.add_event("DatabaseTransactionCommitted")
+                logger.info(f"Order {order.order_id} created successfully with outbox event")
+                span.set_status(Status(StatusCode.OK))
+                return { # API 응답 형식에 맞게 반환
+                    "order_id": str(order.order_id), # 문자열로 변환하여 일관성 유지
+                    "status": "PENDING", # 주문의 초기 상태
+                    "message": "Order created successfully and pending payment."
                 }
-                
-                outbox_event = Outbox(
-                    id=str(uuid.uuid4()),
-                    aggregatetype="order",
-                    aggregateid=str(order_id),
-                    type="order_update_failed",
-                    payload=compensation_event
-                )
-                db.add(outbox_event)
-                logger.info(f"Compensation event for order {order_id} added to outbox")
-                
-        except Exception as e:
-            logger.critical(f"Failed to create compensation event: {str(e)}")
 
-    async def get_order(self, order_id: int) -> Order:
-        logger.info(f"Fetching order {order_id}")
-        # Load order with its items in a single query
-        db = await self._get_read_db()  # Read DB 사용
-        query = (
-            select(Order)
-            .options(selectinload(Order.items))
-            .where(Order.order_id == order_id)
-        )
-        result = await db.execute(query)
-        order = result.scalar_one_or_none()
-        
-        if not order:
-            logger.error(f"Order {order_id} not found")
-            raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
-        
-        return order
+            except HTTPException as http_exc: # HTTP 예외는 그대로 전달
+                logger.error(f"HTTP error in create_order: {http_exc.detail}")
+                span.record_exception(http_exc)
+                span.set_status(Status(StatusCode.ERROR, http_exc.detail))
+                # 예약된 재고 롤백 (SAGA 보상 트랜잭션)
+                if reserved_items:
+                    span.add_event("RollingBackReservedInventory", {"item_count": len(reserved_items)})
+                    logger.info(f"Rolling back inventory reservations for {len(reserved_items)} items")
+                    for prod_id, qty in reserved_items:
+                        try:
+                            await self.product_client.cancel_inventory_reservation(prod_id, qty) # 자동 계측
+                            logger.info(f"Successfully cancelled inventory reservation for product {prod_id}")
+                        except Exception as e:
+                            logger.error(f"Failed to cancel inventory reservation for product {prod_id}: {str(e)}")
+                raise
+            except Exception as e:
+                logger.error(f"Failed to create order for user {order_data.user_id}: {str(e)}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, "FailedToCreateOrder_UnknownError"))
+                # 예약된 재고 롤백
+                if reserved_items:
+                    span.add_event("RollingBackReservedInventoryDueToError", {"item_count": len(reserved_items)})
+                    logger.info(f"Rolling back inventory reservations due to error for {len(reserved_items)} items")
+                    for prod_id, qty in reserved_items:
+                        try:
+                            await self.product_client.cancel_inventory_reservation(prod_id, qty) # 자동 계측
+                            logger.info(f"Successfully cancelled inventory reservation for product {prod_id}")
+                        except Exception as comp_e:
+                            logger.error(f"Failed to compensate inventory for product {prod_id}: {comp_e}", exc_info=True)
+                            # 보상 실패는 별도 로깅 또는 알림 처리
+                            span.add_event("InventoryCompensationFailed", {"product_id": prod_id, "error": str(comp_e)})
+                raise HTTPException(status_code=500, detail=f"Failed to create order: {str(e)}")
+
+    async def handle_payment_success(self, event_data: dict):
+        """결제 성공 이벤트를 처리합니다. (Kafka 핸들러에서 호출됨)"""
+        try:
+            with tracer.start_as_current_span("OrderManager.handle_payment_success") as span:
+                original_event_data_str = json.dumps(event_data) # 로깅 및 실패 시 저장용
+                span.set_attribute("app.event.type", "payment_success")
+                span.set_attribute("app.event.data_preview", original_event_data_str[:256])
+
+                order_id = event_data.get('order_id')
+                payment_id = event_data.get('payment_id')
+                span.set_attribute("app.order_id", str(order_id))
+                if payment_id:
+                    span.set_attribute("app.payment_id", str(payment_id))
+                
+                if not order_id:
+                    err_msg = "Missing order_id in payment_success event"
+                    logger.error(f"{err_msg}: {event_data}")
+                    span.set_status(Status(StatusCode.ERROR, err_msg))
+                    await self._store_failed_event('payment_success_parsing', event_data, err_msg)
+                    return
+
+                logger.info(f"Processing payment success for order_id: {order_id}")
+                
+                retry_count = 0
+                while retry_count <= self.max_retries: # <= 로 변경하여 max_retries 포함 (0부터 시작)
+                    span.add_event(f"ProcessingAttempt", {"retry.count": retry_count})
+                    try:
+                        db = await self._get_write_db()
+                        async with db.begin(): # 트랜잭션
+                            # 1. 주문 조회
+                            query = select(Order).options(selectinload(Order.items)).where(Order.order_id == int(order_id))
+                            result = await db.execute(query)
+                            order = result.scalar_one_or_none()
+                            
+                            if not order:
+                                raise ValueError(f"Order {order_id} not found for payment success")
+                            
+                            # 이미 처리된 주문인지 확인 (멱등성)
+                            if order.status == OrderStatus.COMPLETED:
+                                logger.info(f"Order {order_id} already completed. Idempotency check passed.")
+                                span.add_event("OrderAlreadyCompleted")
+                                span.set_status(Status(StatusCode.OK, "Already completed"))
+                                return
+
+                            # 2. 주문 상태 업데이트
+                            order.status = OrderStatus.COMPLETED
+                            order.updated_at = datetime.datetime.utcnow()
+                            span.add_event("OrderStatusUpdatedToCompleted")
+
+                            # 3. Outbox 이벤트 (order_success) 생성
+                            order_items_payload = [{'product_id': item.product_id, 'quantity': item.quantity, 'price': item.price_at_order} for item in order.items]
+                            order_success_event_payload = {
+                                'type': "order_success",
+                                'order_id': str(order.order_id),
+                                'user_id': order.user_id,
+                                'status': OrderStatus.COMPLETED.value,
+                                'items': order_items_payload,
+                                'payment_id': payment_id,
+                                'amount': event_data.get('amount'),
+                                'payment_method': event_data.get('payment_method', 'unknown'),
+                                'payment_status': 'completed',
+                                'created_at': datetime.datetime.utcnow().isoformat()
+                            }
+                            outbox_event = Outbox(
+                                id=str(uuid.uuid4()), aggregatetype="order", aggregateid=str(order.order_id),
+                                type="order_success", payload=order_success_event_payload
+                            )
+                            db.add(outbox_event)
+                            span.add_event("OutboxEventOrderSuccessPrepared")
+                        
+                        logger.info(f"Successfully processed payment_success for order {order_id}")
+                        span.set_status(Status(StatusCode.OK))
+                        return # 성공 시 루프 종료
+
+                    except ValueError as ve: # 주문 못찾는 경우 등, 재시도 불필요
+                        logger.error(f"ValueError during payment success for order {order_id}: {str(ve)}", exc_info=True)
+                        span.record_exception(ve)
+                        span.set_status(Status(StatusCode.ERROR, f"ValueError: {str(ve)}"))
+                        await self._store_failed_event('payment_success_processing_error', event_data, f"ValueError: {str(ve)}")
+                        return # 루프 종료
+                    except Exception as e:
+                        logger.error(f"Error processing payment success (attempt {retry_count+1}/{self.max_retries+1}) for order {order_id}: {str(e)}", exc_info=True)
+                        span.record_exception(e) # 각 재시도 시 예외 기록
+                        retry_count += 1
+                        if retry_count > self.max_retries:
+                            logger.error(f"Failed to process payment_success after {self.max_retries+1} attempts for order {order_id}.")
+                            span.set_status(Status(StatusCode.ERROR, "MaxRetriesExceeded"))
+                            # 최종 실패 시 보상 이벤트 생성 또는 실패 이벤트 저장
+                            await self.create_compensation_event(event_data, "order_update_to_completed_failed") # 보상 이벤트 타입 명확히
+                            # 또는 await self._store_failed_event('payment_success_max_retries', event_data, str(e))
+                            return # 루프 종료
+                        await asyncio.sleep(self.retry_delay * (2 ** (retry_count -1 ))) # Exponential backoff
+        except Exception as e: # 최상위 예외 처리 (파싱 등 초기 오류)
+            logger.error(f"Unhandled error in handle_payment_success for event: {original_event_data_str}: {str(e)}", exc_info=True)
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, "OuterExceptionInHandlePaymentSuccess"))
+            await self._store_failed_event('payment_success_unhandled_error', json.loads(original_event_data_str), str(e))
+
+    async def handle_payment_failed(self, event_data: dict):
+        """결제 실패 이벤트를 처리합니다. (Kafka 핸들러에서 호출됨)"""
+        with tracer.start_as_current_span("OrderManager.handle_payment_failed") as span:
+            original_event_data_str = json.dumps(event_data)
+            span.set_attribute("app.event.type", "payment_failed")
+            span.set_attribute("app.event.data_preview", original_event_data_str[:256])
+
+            parsed_event_data = event_data # 이미 wrapper에서 파싱되었을 수 있으나, 여기서 다시 확인/처리
+            try:
+                # Debezium 메시지 처리 (필요한 경우) / event_data가 이미 payload일 수 있음
+                if 'payload' in parsed_event_data and isinstance(parsed_event_data['payload'], (dict, str)):
+                    payload_content = parsed_event_data['payload']
+                    if isinstance(payload_content, str):
+                        payload_content = json.loads(payload_content)
+                    parsed_event_data = payload_content # 실제 처리할 데이터
+                
+                order_id = parsed_event_data.get('order_id')
+                # items = parsed_event_data.get('items', []) # 재고 복원에 사용될 수 있음
+
+                span.set_attribute("app.order_id", str(order_id))
+                if not order_id:
+                    err_msg = "Missing order_id in payment_failed event"
+                    logger.error(f"{err_msg}: {parsed_event_data}")
+                    span.set_status(Status(StatusCode.ERROR, err_msg))
+                    await self._store_failed_event('payment_failed_parsing', event_data, err_msg)
+                    return
+
+                logger.info(f"Processing payment failure for order_id: {order_id}")
+                db = await self._get_write_db()
+                async with db.begin():
+                    query = select(Order).options(selectinload(Order.items)).where(Order.order_id == int(order_id))
+                    result = await db.execute(query)
+                    order = result.scalar_one_or_none()
+
+                    if not order:
+                        logger.warning(f"Order {order_id} not found for payment failure. Possibly already handled or invalid.")
+                        span.set_status(Status(StatusCode.OK, "OrderNotFound_PotentiallyHandled")) # 에러는 아닐 수 있음
+                        return
+
+                    if order.status == OrderStatus.CANCELLED:
+                        logger.info(f"Order {order_id} already cancelled. Idempotency check passed.")
+                        span.add_event("OrderAlreadyCancelled")
+                        span.set_status(Status(StatusCode.OK, "Already cancelled"))
+                        return
+
+                    order.status = OrderStatus.CANCELLED
+                    order.updated_at = datetime.datetime.utcnow()
+                    span.add_event("OrderStatusUpdatedToCancelled")
+
+                    # Outbox 이벤트 (order_failed) 생성
+                    order_items_payload = [{'product_id': item.product_id, 'quantity': item.quantity, 'price': item.price_at_order} for item in order.items]
+                    order_failed_event_payload = {
+                        'type': "order_failed",
+                        'order_id': str(order.order_id),
+                        'user_id': order.user_id,
+                        'status': OrderStatus.CANCELLED.value,
+                        'reason': parsed_event_data.get('reason', 'Payment failed'),
+                        'items': order_items_payload, # 주문 취소 시 복원해야 할 아이템 정보
+                        'created_at': datetime.datetime.utcnow().isoformat()
+                    }
+                    outbox_event = Outbox(
+                        id=str(uuid.uuid4()), aggregatetype="order", aggregateid=str(order.order_id),
+                        type="order_failed", payload=order_failed_event_payload
+                    )
+                    db.add(outbox_event)
+                    span.add_event("OutboxEventOrderFailedPrepared")
+
+                    # 중요: 결제 실패 시 예약된 재고를 다시 복원하는 로직 필요.
+                    # 이 로직은 ProductClient를 통해 호출되어야 하며, 각 아이템에 대해 실행.
+                    # 예: for item in order.items:
+                    # await self.product_client.cancel_inventory_reservation(item.product_id, item.quantity)
+                    # 이 부분은 현재 코드에 명시적으로 없으므로, 추가 구현 필요 시 고려.
+                    # 여기서는 Outbox 이벤트만 생성하고, 재고 복원은 다른 서비스(예: Product 서비스가 order_failed 이벤트 구독)에서 처리한다고 가정.
+                
+                logger.info(f"Successfully processed payment_failed for order {order_id}, status set to CANCELLED.")
+                span.set_status(Status(StatusCode.OK))
+
+            except json.JSONDecodeError as je:
+                logger.error(f"JSONDecodeError in handle_payment_failed for event: {original_event_data_str}: {str(je)}", exc_info=True)
+                span.record_exception(je)
+                span.set_status(Status(StatusCode.ERROR, "JSONDecodeError"))
+                await self._store_failed_event('payment_failed_json_parsing', json.loads(original_event_data_str), str(je))
+            except Exception as e:
+                logger.error(f"Unhandled error in handle_payment_failed for event: {original_event_data_str}: {str(e)}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, "UnhandledExceptionInHandlePaymentFailed"))
+                await self._store_failed_event('payment_failed_unhandled_error', json.loads(original_event_data_str), str(e))
+
+    async def create_compensation_event(self, original_event: dict, compensation_type: str):
+        """보상 이벤트를 Outbox에 기록합니다."""
+        with tracer.start_as_current_span("OrderManager.create_compensation_event") as span:
+            order_id = original_event.get('order_id')
+            span.set_attribute("app.order_id", str(order_id))
+            span.set_attribute("app.compensation.type", compensation_type)
+            logger.info(f"Creating compensation event '{compensation_type}' for order {order_id}")
+            try:
+                db = await self._get_write_db()
+                async with db.begin():
+                    compensation_event_payload = {
+                        'type': compensation_type, # 예: "order_update_to_completed_failed"
+                        'order_id': str(order_id),
+                        'original_event_preview': json.dumps(original_event)[:256], # 원본 이벤트 요약
+                        'reason': f'Compensation for {compensation_type}',
+                        'timestamp': datetime.datetime.utcnow().isoformat()
+                    }
+                    outbox_event = Outbox(
+                        id=str(uuid.uuid4()),
+                        aggregatetype="order_compensation", # 별도 aggregate type 또는 order 사용
+                        aggregateid=str(order_id),
+                        type=compensation_type, 
+                        payload=compensation_event_payload
+                    )
+                    db.add(outbox_event)
+                    logger.info(f"Compensation event '{compensation_type}' for order {order_id} added to outbox.")
+                    span.set_status(Status(StatusCode.OK))
+            except Exception as e:
+                logger.critical(f"Failed to create compensation event for order {order_id}: {str(e)}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, "FailedToCreateCompensationEvent"))
+                # 보상 이벤트 생성 실패는 매우 심각한 상황, 별도 알림 필요
+
+    async def get_order(self, order_id: int) -> Optional[Order]: # Optional 추가
+        """특정 주문 정보를 조회합니다."""
+        with tracer.start_as_current_span("OrderManager.get_order") as span:
+            span.set_attribute("app.order_id", order_id)
+            logger.info(f"Fetching order {order_id}")
+            try:
+                db = await self._get_read_db()
+                query = select(Order).options(selectinload(Order.items)).where(Order.order_id == order_id)
+                result = await db.execute(query) # SQLAlchemyInstrumentor가 계측
+                order = result.scalar_one_or_none()
+                
+                if not order:
+                    logger.warning(f"Order {order_id} not found")
+                    span.set_attribute("app.order.found", False)
+                    # HTTPException 대신 None을 반환하고 호출부에서 처리하도록 변경 가능
+                    # 여기서는 기존 로직을 따라 HTTPException 발생시킴
+                    # raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+                    span.set_status(Status(StatusCode.OK, "OrderNotFound")) # 기술적으로는 에러가 아님
+                    return None 
+                
+                span.set_attribute("app.order.found", True)
+                span.set_attribute("app.order.status", order.status.value)
+                span.set_status(Status(StatusCode.OK))
+                return order
+            except Exception as e:
+                logger.error(f"Error fetching order {order_id}: {str(e)}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, "FailedToFetchOrder"))
+                raise # 또는 HTTPException으로 변환하여 발생
     
     async def get_user_orders(self, user_id: str) -> list[Order]:
-        logger.info(f"Fetching orders for user {user_id}")
-        # Load orders with their items in a single query
-        db = await self._get_read_db()  # Read DB 사용
-        query = (
-            select(Order)
-            .options(selectinload(Order.items))
-            .where(Order.user_id == user_id)
-        )
-        result = await db.execute(query)
-        return result.scalars().all()
+        """특정 사용자의 모든 주문 목록을 조회합니다."""
+        with tracer.start_as_current_span("OrderManager.get_user_orders") as span:
+            span.set_attribute("app.user_id", user_id)
+            logger.info(f"Fetching orders for user {user_id}")
+            try:
+                db = await self._get_read_db()
+                query = select(Order).options(selectinload(Order.items)).where(Order.user_id == user_id)
+                result = await db.execute(query) # SQLAlchemyInstrumentor가 계측
+                orders = result.scalars().all()
+                span.set_attribute("app.order_count", len(orders))
+                span.set_status(Status(StatusCode.OK))
+                return orders
+            except Exception as e:
+                logger.error(f"Error fetching orders for user {user_id}: {str(e)}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, "FailedToFetchUserOrders"))
+                raise
     
     async def update_order_status(self, order_id: int, status: OrderStatus) -> Order:
-        logger.info(f"Updating status for order {order_id} to {status}")
-        order = await self.get_order(order_id)
-        db = await self._get_write_db()  # Write DB 사용
-        order.status = status
-        await db.commit()
-        return order
-    
-    async def update_order(self, order_id: str, order_update: OrderUpdate) -> Order:
-        logger.info(f"Updating order {order_id}")
-        order = await self.get_order(order_id)
-        db = await self._get_write_db()  # Write DB 사용
-        
-        # Update order fields
-        for field, value in order_update.dict(exclude_unset=True).items():
-            setattr(order, field, value)
-        
-        order.updated_at = datetime.datetime.utcnow()
-        await db.commit()
-        return order
-    
-    async def delete_order(self, order_id: str):
-        logger.info(f"Deleting order {order_id}")
-        order = await self.get_order(order_id)
-        db = await self._get_write_db()  # Write DB 사용
-        await db.delete(order)
-        await db.commit()
+        """주문의 상태를 변경합니다."""
+        with tracer.start_as_current_span("OrderManager.update_order_status") as span:
+            span.set_attribute("app.order_id", order_id)
+            span.set_attribute("app.order.new_status", status.value)
+            logger.info(f"Updating status for order {order_id} to {status}")
+            try:
+                db = await self._get_write_db()
+                async with db.begin(): # 명시적 트랜잭션
+                    # get_order를 호출하면 중복 스팬이 생길 수 있으므로, 직접 조회 또는 내부 로직 사용
+                    order_query = select(Order).where(Order.order_id == order_id)
+                    result = await db.execute(order_query)
+                    order = result.scalar_one_or_none()
+
+                    if not order:
+                        raise HTTPException(status_code=404, detail=f"Order {order_id} not found for status update")
+                    
+                    order.status = status
+                    order.updated_at = datetime.datetime.utcnow()
+                    # await db.commit() # async with db.begin() 사용 시 자동 커밋
+                
+                # Outbox 이벤트 생성 (예: order_status_updated) - 필요시 추가
+                # ... 
+
+                span.set_status(Status(StatusCode.OK))
+                return order
+            except HTTPException as http_exc:
+                span.record_exception(http_exc)
+                span.set_status(Status(StatusCode.ERROR, http_exc.detail))
+                raise
+            except Exception as e:
+                logger.error(f"Error updating status for order {order_id}: {str(e)}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, "FailedToUpdateOrderStatus"))
+                raise
+
+    # update_order, delete_order 등 다른 public 메서드도 유사한 방식으로 트레이싱 적용 가능
     
     async def close(self):
-        """Cleanup resources"""
-        if self.write_db:
-            await self.write_db.close()
-        if self.read_db:
-            await self.read_db.close()
-        await self.product_client.close()
-        await self.user_client.close()
+        """DB 세션 및 gRPC 클라이언트 연결을 정리합니다."""
+        with tracer.start_as_current_span("OrderManager.close") as span:
+            closed_resources = []
+            try:
+                if self.current_write_db_session and not self.write_db_session_provided: # 주입되지 않은 세션만 닫음
+                    await self.current_write_db_session.close()
+                    closed_resources.append("WriteDBSession")
+                if self.current_read_db_session:
+                    await self.current_read_db_session.close()
+                    closed_resources.append("ReadDBSession")
+                
+                # gRPC 클라이언트 close 메서드가 비동기이고 필요하다면 호출
+                # UserClient와 ProductClient에 비동기 close 메서드가 있다고 가정
+                await self.user_client.close() # 자동 계측 (GrpcInstrumentorClient)
+                closed_resources.append("UserClient")
+                await self.product_client.close() # 자동 계측 (GrpcInstrumentorClient)
+                closed_resources.append("ProductClient")
+
+                logger.info(f"OrderManager resources closed: {', '.join(closed_resources)}")
+                span.set_attribute("app.closed_resources", ", ".join(closed_resources))
+                span.set_status(Status(StatusCode.OK))
+            except Exception as e:
+                logger.error(f"Error during OrderManager close: {str(e)}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, "FailedToCloseResources"))
+
+    async def update_order(self, order_id: int, order_update: OrderUpdate) -> Order: # order_id 타입을 int로 가정
+        with tracer.start_as_current_span("OrderManager.update_order") as span:
+            span.set_attribute("app.order_id", order_id)
+            logger.info(f"Updating order {order_id}")
+            try:
+                db = await self._get_write_db()
+                async with db.begin():
+                    order = await self.get_order_within_session(db, order_id) # 세션 내에서 조회하는 헬퍼 사용
+                    if not order:
+                        raise HTTPException(status_code=404, detail=f"Order {order_id} not found for update")
+
+                    update_data = order_update.dict(exclude_unset=True)
+                    span.set_attribute("app.update_fields_count", len(update_data))
+                    for field, value in update_data.items():
+                        setattr(order, field, value)
+                    order.updated_at = datetime.datetime.utcnow()
+                
+                # Outbox 이벤트 생성 (예: order_general_updated) - 필요시 추가
+
+                span.set_status(Status(StatusCode.OK))
+                return order
+            except HTTPException as http_exc:
+                span.record_exception(http_exc)
+                span.set_status(Status(StatusCode.ERROR, http_exc.detail))
+                raise
+            except Exception as e:
+                logger.error(f"Error updating order {order_id}: {str(e)}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, "FailedToUpdateOrder"))
+                raise
+
+    async def delete_order(self, order_id: int): # order_id 타입을 int로 가정
+        with tracer.start_as_current_span("OrderManager.delete_order") as span:
+            span.set_attribute("app.order_id", order_id)
+            logger.info(f"Deleting order {order_id}")
+            try:
+                db = await self._get_write_db()
+                async with db.begin():
+                    order = await self.get_order_within_session(db, order_id) # 세션 내에서 조회
+                    if not order:
+                        raise HTTPException(status_code=404, detail=f"Order {order_id} not found for deletion")
+                    await db.delete(order) # SQLAlchemyInstrumentor가 계측
+                
+                # Outbox 이벤트 생성 (예: order_deleted) - 필요시 추가
+
+                span.set_status(Status(StatusCode.OK))
+            except HTTPException as http_exc:
+                span.record_exception(http_exc)
+                span.set_status(Status(StatusCode.ERROR, http_exc.detail))
+                raise
+            except Exception as e:
+                logger.error(f"Error deleting order {order_id}: {str(e)}", exc_info=True)
+                span.record_exception(e)
+                span.set_status(Status(StatusCode.ERROR, "FailedToDeleteOrder"))
+                raise
+
+    async def get_order_within_session(self, db: AsyncSession, order_id: int) -> Optional[Order]:
+        """(Helper) Pro_vide_d session to fetch an order with items."""
+        # 이 헬퍼는 외부 호출이 아닌, 이미 스팬이 활성화된 컨텍스트 내에서 사용됨
+        # 별도 스팬을 만들 수도 있지만, SQLAlchemyInstrumentor가 DB 쿼리를 계측하므로 생략 가능
+        query = select(Order).options(selectinload(Order.items)).where(Order.order_id == order_id)
+        result = await db.execute(query)
+        return result.scalar_one_or_none()

@@ -2,95 +2,105 @@ from fastapi import FastAPI, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.api import api_router
 from app.config.database import Base, write_engine, read_engine, WriteSessionLocal
-from app.config.otel import setup_telemetry
-from app.services.kafka_service import init_kafka_consumer, stop_kafka_consumer, kafka_consumer
+# setup_telemetry와 instrument_fastapi_app 헬퍼 함수를 함께 임포트합니다.
+from app.config.otel import setup_telemetry, instrument_fastapi_app
+from app.services.kafka_service import init_kafka_consumer, stop_kafka_consumer # kafka_consumer는 직접 사용하지 않으면 제거 가능
 import logging
 import asyncio
 import uvicorn
 from contextlib import asynccontextmanager
-from sqlalchemy import text, MetaData, select
+from sqlalchemy import text # MetaData, select는 현재 main.py에서 직접 사용 안됨
 from app.services.order_manager import OrderManager
 import os
 
+# OrderManager에서 사용하는 모델들이므로 여기에 있을 필요는 없지만, 테이블 생성 로직에 필요
 from app.models.order import Order, OrderItem, OrderStatus
 from app.models.failed_event import FailedEvent
 from app.models.outbox import Outbox
 
 from fastapi.responses import JSONResponse
 
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# 로깅 설정 (애플리케이션 진입점에서 한 번 설정하는 것이 좋습니다)
+# logging.basicConfig(level=logging.INFO) # 이미 설정되어 있다면 중복 호출 방지
 logger = logging.getLogger(__name__)
 
 
-# create table if not exist
+# --- OpenTelemetry 초기화 ---
+# 1. OpenTelemetry 기본 설정 실행 (다른 자동 계측기 포함, FastAPI 제외)
+setup_telemetry()
+
+
+# 테이블 생성 함수 (변경 없음)
 async def safe_create_tables_if_not_exist(conn):
     try:
-        # 테이블 존재 여부 확인
         result = await conn.execute(text("SHOW TABLES"))
         existing_tables = [row[0] for row in result]
         logger.info(f"Existing tables: {existing_tables}")
         
-        # SQLAlchemy의 checkfirst 옵션 사용 (create_all 내부적으로 IF NOT EXISTS 사용)
         await conn.run_sync(lambda sync_conn: Base.metadata.create_all(
-            sync_conn, 
-            checkfirst=True  # 테이블이 이미 존재하면 건너뛰기
+            sync_conn,
+            checkfirst=True
         ))
-        
         logger.info("Tables created or already exist")
         
-        # 생성 후 테이블 확인
         result = await conn.execute(text("SHOW TABLES"))
         tables = [row[0] for row in result]
         logger.info(f"Tables after creation: {tables}")
-        
     except Exception as e:
         logger.error(f"Error in safe_create_tables_if_not_exist: {e}")
         raise
 
+# Lifespan 컨텍스트 매니저
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Primary DB에 테이블 생성
+    # 애플리케이션 시작 시 실행될 코드
+    logger.info("Application startup: Initializing resources...")
+    
+    # DB 테이블 생성
     async with write_engine.begin() as conn:
         await safe_create_tables_if_not_exist(conn)
-    
-    # Secondary DB에도 테이블 생성
     async with read_engine.begin() as conn:
         await safe_create_tables_if_not_exist(conn)
     
-    # Initialize Kafka consumer for payment events
+    # Kafka 소비자 초기화
+    # AIOKafkaInstrumentor는 setup_telemetry에서 이미 instrument() 되었으므로, 여기서 생성/시작되는 consumer는 자동 계측됩니다.
     await init_kafka_consumer()
     
-    # Initialize OrderManager
+    # OrderManager 초기화
     order_manager = OrderManager()
+    app.state.order_manager = order_manager # FastAPI 앱 상태에 저장
+    logger.info("OrderManager initialized and stored in app state.")
     
-    # Store order_manager in app state
-    app.state.order_manager = order_manager
+    yield # 애플리케이션 실행 구간
     
-    yield
-    
-    # Cleanup
+    # 애플리케이션 종료 시 실행될 코드 (리소스 정리)
+    logger.info("Application shutdown: Cleaning up resources...")
     await stop_kafka_consumer()
-    await order_manager.close()
+    if hasattr(app.state, 'order_manager') and app.state.order_manager:
+        await app.state.order_manager.close()
+    logger.info("Resources cleaned up.")
 
-# Dependency to get OrderManager
-async def get_order_manager() -> OrderManager:
-    return app.state.order_manager
-
-# Create application with lifespan handler
+# --- FastAPI 애플리케이션 생성 및 계측 ---
+# 2. FastAPI 앱 인스턴스 생성
 app = FastAPI(title="Order Service API", lifespan=lifespan)
 
-# API router registration
+# 3. 생성된 FastAPI 앱 인스턴스를 명시적으로 계측
+instrument_fastapi_app(app)
+logger.info("FastAPI application instrumented by OpenTelemetry.")
+
+
+# API 라우터 등록
 app.include_router(api_router, prefix="/api")
 
-# Initialize OpenTelemetry
-setup_telemetry()
+# OrderManager 의존성 주입 함수 (변경 없음)
+async def get_order_manager() -> OrderManager:
+    # lifespan에서 app.state.order_manager가 설정되었는지 확인하는 로직 추가 가능
+    if not hasattr(app.state, 'order_manager') or not app.state.order_manager:
+        # 이 경우는 lifespan이 제대로 실행되지 않았거나 문제가 있는 상황
+        logger.error("OrderManager not found in app state during get_order_manager call.")
+        raise RuntimeError("OrderManager not initialized. Check application lifespan.")
+    return app.state.order_manager
 
-# @app.get("/health")
-# def health_check():
-#     logger.info("Health check endpoint called")
-#     return {"status": "OK"}
 
 @app.get("/health/live")
 async def liveness():
@@ -101,48 +111,54 @@ async def liveness():
 
 @app.get("/health/ready")
 async def readiness():
-    """
-    Readiness probe - 서비스가 요청을 처리할 준비가 되었는지 확인
-    """
     errors = []
-    status = {}
+    status_details = {} # status -> status_details 로 변수명 변경 (명확성)
     
-    # 1. MySQL DB 연결 확인
+    # DB 연결 확인
     try:
         async with WriteSessionLocal() as session:
-            from sqlalchemy import text
+            # SQLAlchemyInstrumentor가 이 DB 호출을 자동 계측 (setup_telemetry 이후 실행되므로)
             result = await session.execute(text("SELECT 1"))
-            status["mysql"] = "connected"
+            status_details["mysql"] = "connected"
     except Exception as e:
-        logger.error(f"MySQL connection failed: {str(e)}")
+        logger.error(f"MySQL connection failed for readiness probe: {str(e)}")
         errors.append(f"MySQL: {str(e)}")
-        status["mysql"] = "failed"
+        status_details["mysql"] = "failed"
     
-    # 2. Kafka 연결 상태 확인 - kafka_consumer 글로벌 변수 사용
+    # Kafka 연결 상태 확인
     try:
-        # app.services.kafka_service에서 가져온 글로벌 변수 사용
-        from app.services.kafka_service import kafka_consumer
-        
-        # 연결 상태 확인 로직 개선 - 예시: 초기화 여부만 확인
-        if kafka_consumer is not None:
-            status["kafka"] = "running"
+        from app.services.kafka_service import kafka_consumer # 여기서 다시 임포트
+        if kafka_consumer and getattr(kafka_consumer, 'running', False): # .running 속성으로 실제 실행 여부 확인
+            status_details["kafka"] = "running"
+        elif kafka_consumer:
+            status_details["kafka"] = "initialized_not_running"
         else:
-            status["kafka"] = "initialized"  # 여기에서는 초기화 여부만 확인하고 에러로 취급하지 않음
-    except ImportError as e:
-        logger.error(f"Kafka module import error: {str(e)}")
-        status["kafka"] = "import_error"  # 에러 발생해도 ready로 간주
+            status_details["kafka"] = "not_initialized"
     except Exception as e:
-        logger.error(f"Kafka status check failed: {str(e)}")
-        status["kafka"] = "check_failed"  # 에러 발생해도 ready로 간주
+        logger.error(f"Kafka status check failed for readiness probe: {str(e)}")
+        # Kafka 연결 실패는 서비스 준비 상태에 영향을 줄 수 있음 (요구사항에 따라)
+        errors.append(f"Kafka: {str(e)}") 
+        status_details["kafka"] = "check_failed"
     
-    # 3. 결과 반환 - Kafka 오류가 있어도 준비 상태로 간주 (프로덕션에서는 요구사항에 따라 조정)
-    if errors and all("mysql" in error for error in errors):  # MySQL 오류만 심각한 오류로 처리
+    # 모든 주요 의존성(여기서는 DB)이 준비되었는지 확인
+    if "mysql" in status_details and status_details["mysql"] == "failed":
+        logger.warning(f"Readiness probe failed: MySQL connection issue. Details: {status_details}, Errors: {errors}")
         return JSONResponse(
             status_code=503,
-            content={"status": "not ready", "details": status, "errors": errors}
+            content={"status": "not ready", "details": status_details, "errors": errors}
         )
     
-    return {"status": "ready", "details": status}
+    # Kafka도 준비 상태에 영향을 미치도록 하려면 아래 조건 추가
+    # if "kafka" in status_details and status_details["kafka"] != "running":
+    #     logger.warning(f"Readiness probe failed: Kafka not running. Details: {status_details}, Errors: {errors}")
+    #     return JSONResponse(
+    #         status_code=503,
+    #         content={"status": "not ready", "details": status_details, "errors": errors}
+    #     )
+
+    logger.info(f"Readiness probe successful. Details: {status_details}")
+    return {"status": "ready", "details": status_details}
+
 
 @app.get("/test-connections")
 async def test_connections():

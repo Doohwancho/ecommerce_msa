@@ -15,10 +15,14 @@ tracer = trace.get_tracer(__name__)
 
 router = APIRouter()
 
+async def get_order_manager() -> OrderManager:
+    """OrderManager 인스턴스를 생성하고 반환하는 의존성 함수"""
+    return OrderManager()
+
 @router.post("/", response_model=OrderCreateResponse)
 async def create_order(
     order: OrderCreate,
-    # background_tasks: BackgroundTasks = BackgroundTasks()
+    order_manager: OrderManager = Depends(get_order_manager)
 ):
     with tracer.start_as_current_span("create_order") as span:
         try:
@@ -32,8 +36,7 @@ async def create_order(
                 span.set_attribute(f"order.item_{idx}.quantity", item.quantity)
             
             logger.info("POST /api/orders/ called")
-            manager = OrderManager()
-            result = await manager.create_order(order)
+            result = await order_manager.create_order(order)
             
             # Set order creation result attributes
             if result and hasattr(result, 'order_id'):

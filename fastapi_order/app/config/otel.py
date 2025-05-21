@@ -1,110 +1,115 @@
+# telemetry_setup.py (기존 setup_telemetry.py 내용을 수정)
 import os
 import logging
+import atexit
 
-from opentelemetry import trace # 트레이싱용
+from opentelemetry import trace, _logs as otel_logs # _logs 임포트 경로 수정 가능성 있음 (버전 따라)
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter # 사용하시는 익스포터
 
-from opentelemetry._logs import set_logger_provider # 로깅 프로바이더 설정용
-from opentelemetry.sdk._logs import LoggerProvider # 로거 프로바이더
-from opentelemetry.sdk._logs.export import BatchLogRecordProcessor # 로그 프로세서
-from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter # 로그 익스포터
+# from opentelemetry._logs import set_logger_provider # SDK 버전 1.20.0 이상
+# from opentelemetry.sdk._logs import LoggerProvider, LoggingLevel # SDK 버전 1.20.0 이상
+# from opentelemetry.sdk._logs.export import BatchLogRecordProcessor # SDK 버전 1.20.0 이상
+# from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter # SDK 버전 1.20.0 이상
+# 참고: opentelemetry-sdk 1.15.0 이전 버전에서는 _logs API가 실험적이었고,
+# 1.20.0 이후 안정화되면서 API 경로/이름에 변경이 있을 수 있습니다.
+# 사용하시는 1.33.0 버전에 맞는 정확한 임포트 경로를 확인해야 합니다.
+# 여기서는 제공된 코드의 임포트 경로를 최대한 따르겠습니다.
+from opentelemetry.sdk._logs import LoggerProvider
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+# otel_logs.set_logger_provider 사용을 위해 set_logger_provider 직접 임포트
+try:
+    from opentelemetry._logs import set_logger_provider
+except ImportError: # 이전 버전 호환성 (예시)
+    from opentelemetry.sdk._logs import LoggingHandler
+    # 오래된 방식에서는 LoggingHandler를 표준 로깅에 추가하고, set_logger_provider가 없을 수 있음
+    # 1.33.0 버전이면 set_logger_provider가 있을 것으로 예상
 
-from opentelemetry.sdk.resources import Resource # 트레이싱/로깅 같이 쓰는 리소스
+from opentelemetry.sdk.resources import Resource, DEPLOYMENT_ENVIRONMENT, SERVICE_NAME as SDK_SERVICE_NAME
+from opentelemetry.semconv.resource import ResourceAttributes # Semantic Conventions 사용 권장
 
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.grpc import GrpcInstrumentorClient
-# PyMongo instrumentation은 원래 코드에 없었으므로 제외했습니다. 필요하면 추가하세요.
-# from opentelemetry.instrumentation.pymongo import PymongoInstrumentor
-from opentelemetry.instrumentation.kafka import KafkaInstrumentor # Kafka 계측 임포트 유지
-from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor # SQLAlchemy 계측 임포트 유지
+from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+from opentelemetry.instrumentation.aiokafka import AIOKafkaInstrumentor # aiokafka 용 계측기
 from opentelemetry.instrumentation.logging import LoggingInstrumentor
-
 
 logger = logging.getLogger(__name__)
 
 # OpenTelemetry settings
 OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317")
-# OTEL_SERVICE_NAME은 Deployment YAML 환경 변수에서 제대로 설정되어야 함
-OTEL_SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "order-service") # 기본값은 중요하지 않음, YAML에서 덮어쓸 거라
+OTEL_SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "order-service")
+OTEL_TRACES_SAMPLER = os.getenv("OTEL_TRACES_SAMPLER", "parentbased_always_on") # 프로덕션 권장 샘플러
+OTEL_ENVIRONMENT = os.getenv("OTEL_ENVIRONMENT", "development")
 
-# 트레이스 샘플러 설정 (필요에 따라 수정)
-OTEL_TRACES_SAMPLER = os.getenv("OTEL_TRACES_SAMPLER", "always_on") # always_on, parentbased_always_on 등
-
-# 메트릭스/트레이스 익스포터 타입 변수는 설정 자체에 직접 사용되지 않으므로 제거하거나 필요에 따라 유지
-# OTEL_METRICS_EXPORTER = os.getenv("OTEL_METRICS_EXPORTER", "otlp")
-# OTEL_TRACES_EXPORTER = os.getenv("OTEL_TRACES_EXPORTER", "otlp")
-
+_TRACER_PROVIDER = None
+_LOGGER_PROVIDER = None
 
 def setup_telemetry():
-    """
-    OpenTelemetry 설정 (트레이싱 + 포괄적 로깅)을 초기화합니다.
-    """
+    global _TRACER_PROVIDER, _LOGGER_PROVIDER
+
     try:
-        # --- 리소스 설정 ---
-        # 트레이싱과 로깅이 공유할 서비스 정보 등의 리소스를 정의합니다.
         resource = Resource.create({
-            "service.name": OTEL_SERVICE_NAME, # 이 서비스의 이름
-            # "deployment.environment": os.getenv("ENVIRONMENT", "development"), # 환경 정보 등 추가 가능
-            # 다른 리소스 속성들은 https://opentelemetry.io/docs/specs/resource/semantic_conventions/ 참조
+            SDK_SERVICE_NAME: OTEL_SERVICE_NAME,
+            DEPLOYMENT_ENVIRONMENT: OTEL_ENVIRONMENT,
         })
 
-        # --- 트레이싱 설정 ---
-        # 트레이서 프로바이더 설정 (리소스 연결)
+        # --- Tracing 설정 ---
         tracer_provider = TracerProvider(resource=resource)
         trace.set_tracer_provider(tracer_provider)
+        _TRACER_PROVIDER = tracer_provider
 
-        # OTLP 스팬 익스포터 설정 (트레이스를 컬렉터로 보냄)
         otlp_span_exporter = OTLPSpanExporter(endpoint=OTEL_EXPORTER_OTLP_ENDPOINT)
-        # 스팬 프로세서 설정 (스팬을 모아서 배치로 보냄)
         span_processor = BatchSpanProcessor(otlp_span_exporter)
         tracer_provider.add_span_processor(span_processor)
 
-        # --- 로깅 설정 ---
-        # OTLP 로그 익스포터 설정 (로그 레코드를 컬렉터로 보냄)
-        # 트레이스와 같은 OTLP 컬렉터 주소를 사용합니다.
-        otlp_log_exporter = OTLPLogExporter(endpoint=OTEL_EXPORTER_OTLP_ENDPOINT)
-
-        # 로그 레코드 프로세서 생성 (로그 레코드를 모아서 배치로 보냄)
-        log_record_processor = BatchLogRecordProcessor(otlp_log_exporter)
-
-        # 로거 프로바이더 생성 (리소스 연결)
-        # 이 프로바이더를 통해 생성된 로거들이 로그를 OpenTelemetry 파이프라인으로 보냅니다.
+        # --- Logging 설정 ---
         logger_provider = LoggerProvider(resource=resource)
-        logger_provider.add_log_record_processor(log_record_processor)
-
-        # OpenTelemetry 로거 프로바이더를 파이썬의 표준 로깅 시스템에 연결
-        # 이를 통해 표준 logging.getLogger(__name__).info(...) 호출이 OTel 파이프라인으로 흐르게 됩니다.
         set_logger_provider(logger_provider)
+        _LOGGER_PROVIDER = logger_provider
 
-        # OpenTelemetry 로깅 계측 활성화
-        # 이 부분이 표준 logging 라이브러리를 후킹하여 로그 레코드에 트레이스 컨텍스트(Trace ID/Span ID)를 추가합니다.
-        # 또한, set_logger_provider로 설정된 OTel 파이프라인으로 로그 레코드를 보냅니다.
-        LoggingInstrumentor().instrument() # <-- 임포트 이름과 초기화 방식 수정
+        otlp_log_exporter = OTLPLogExporter(endpoint=OTEL_EXPORTER_OTLP_ENDPOINT)
+        log_record_processor = BatchLogRecordProcessor(otlp_log_exporter)
+        logger_provider.add_log_record_processor(log_record_processor)
+        
+        LoggingInstrumentor().instrument(set_logging_format=True)
 
-
-        # --- 라이브러리 인스트루멘테이션 설정 ---
-        # 서비스에서 사용하는 라이브러리들을 계측하여 자동으로 트레이스/스팬을 생성하게 합니다.
-        # FastAPI는 일반적으로 제일 먼저 계측하는 것이 좋습니다.
-        FastAPIInstrumentor().instrument()
-
-        # gRPC 클라이언트 호출 계측 (다른 서비스 호출 시)
+        # --- 라이브러리 인스트루멘테이션 ---
+        # FastAPI는 별도로 instrument_fastapi_app 함수를 통해 처리
         GrpcInstrumentorClient().instrument()
-
-        # Kafka 클라이언트 계측 (kafka-python, aiokafka)
-        KafkaInstrumentor().instrument()
-
-        # SQLAlchemy 계측 (데이터베이스 ORM)
         SQLAlchemyInstrumentor().instrument()
+        AIOKafkaInstrumentor().instrument()
 
-        # 사용하는 다른 라이브러리들도 필요에 따라 여기에 추가합니다.
-        # 예: Redis, Requests, Django, Flask 등
-
-
-        logger.info("OpenTelemetry tracing and logging instrumentation setup completed successfully")
+        logger.info(f"OpenTelemetry tracing and logging for '{OTEL_SERVICE_NAME}' in '{OTEL_ENVIRONMENT}' setup complete. Endpoint: {OTEL_EXPORTER_OTLP_ENDPOINT}")
 
     except Exception as e:
-        # OpenTelemetry 설정 중 에러가 발생하면 중요한 문제이므로 로깅하고 예외를 다시 발생시키는 것이 좋습니다.
-        logger.error(f"Failed to setup OpenTelemetry instrumentation: {str(e)}", exc_info=True) # exc_info=True로 에러 정보도 로깅
-        raise # 앱 시작 전에 실패하면 앱 실행을 중단
+        logger.error(f"Failed to setup OpenTelemetry instrumentation: {str(e)}", exc_info=True)
+        raise
+
+def shutdown_telemetry():
+    global _TRACER_PROVIDER, _LOGGER_PROVIDER
+    if _TRACER_PROVIDER and hasattr(_TRACER_PROVIDER, 'shutdown'):
+        logger.info("Shutting down OpenTelemetry TracerProvider...")
+        _TRACER_PROVIDER.shutdown()
+        logger.info("TracerProvider shutdown complete.")
+    
+    if _LOGGER_PROVIDER and hasattr(_LOGGER_PROVIDER, 'shutdown'):
+        logger.info("Shutting down OpenTelemetry LoggerProvider...")
+        _LOGGER_PROVIDER.shutdown()
+        logger.info("LoggerProvider shutdown complete.")
+
+# 애플리케이션 종료 시 자동 호출되도록 등록
+atexit.register(shutdown_telemetry)
+
+def instrument_fastapi_app(app):
+    """FastAPI 앱을 OpenTelemetry로 계측합니다."""
+    if app is None:
+        raise ValueError("FastAPI app instance cannot be None")
+    FastAPIInstrumentor.instrument_app(app)
+    logger.info("FastAPI application instrumented by OpenTelemetry")
+
+# SQLAlchemy 엔진 계측 (필요시)
+# def instrument_sqlalchemy_engine(engine):
+#     SQLAlchemyInstrumentor().instrument(engine=engine)
