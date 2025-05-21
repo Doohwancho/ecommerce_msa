@@ -14,23 +14,53 @@ spec:
         app: debezium-connect
     spec:
       containers:
-      - name: debezium-connect
-        # image: debezium/connect:2.3
-        # image: debezium/connect:2.7.3.Final
-        image: debezium/connect:3.0.0.Final
-        ports:
-        - containerPort: 8083
-        env:
-        - name: BOOTSTRAP_SERVERS
-          value: "kafka-service:9092"
-        - name: GROUP_ID
-          value: "1"
-        - name: CONFIG_STORAGE_TOPIC
-          value: "debezium-connect-configs"
-        - name: OFFSET_STORAGE_TOPIC
-          value: "debezium-connect-offsets"
-        - name: STATUS_STORAGE_TOPIC
-          value: "debezium-connect-status"
+        - name: debezium-connect
+          # image: debezium/connect:2.3
+          # image: debezium/connect:2.7.3.Final
+          image: debezium/connect:3.0.0.Final
+          ports:
+            - containerPort: 8083
+          env:
+            - name: BOOTSTRAP_SERVERS
+              value: "kafka-service:9092"
+            - name: GROUP_ID
+              value: "1"
+            - name: CONFIG_STORAGE_TOPIC
+              value: "debezium-connect-configs"
+            - name: OFFSET_STORAGE_TOPIC
+              value: "debezium-connect-offsets"
+            - name: STATUS_STORAGE_TOPIC
+              value: "debezium-connect-status"
+            - name: CONNECT_CONNECTOR_CLIENT_CONFIG_OVERRIDE_POLICY
+              value: "All"
+            - name: CONNECT_PRODUCER_MAX_REQUEST_SIZE
+              value: "1048576"
+            - name: CONNECT_CONSUMER_MAX_PARTITION_FETCH_BYTES
+              value: "1048576"
+            - name: CONNECT_CONSUMER_FETCH_MAX_WAIT_MS
+              value: "500"
+            - name: CONNECT_CONSUMER_FETCH_MIN_BYTES
+              value: "1"
+            - name: CONNECT_CONSUMER_HEARTBEAT_INTERVAL_MS
+              value: "3000"
+            - name: CONNECT_CONSUMER_SESSION_TIMEOUT_MS
+              value: "10000"
+            - name: CONNECT_CONSUMER_MAX_POLL_INTERVAL_MS
+              value: "300000"
+            - name: CONNECT_CONSUMER_AUTO_OFFSET_RESET
+              value: "earliest"
+            - name: CONNECT_CONSUMER_ENABLE_AUTO_COMMIT
+              value: "false"
+            - name: CONNECT_PRODUCER_ACKS
+              value: "all"
+            - name: CONNECT_PRODUCER_RETRIES
+              value: "3"
+            - name: CONNECT_PRODUCER_RETRY_BACKOFF_MS
+              value: "1000"
+            - name: CONNECT_PRODUCER_MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION
+              value: "1"
+            - name: CONNECT_PRODUCER_ENABLE_IDEMPOTENCE
+              value: "true"
 ---
 apiVersion: v1
 kind: Service
