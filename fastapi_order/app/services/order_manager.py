@@ -13,11 +13,9 @@ import logging
 import datetime
 import json
 from typing import Optional
-from kafka.errors import KafkaError
 import uuid
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
-from app.config.kafka_consumer import OrderKafkaConsumer
 from app.config.database import WriteSessionLocal, ReadSessionLocal
 import os
 
@@ -29,10 +27,6 @@ class OrderManager:
     def __init__(self, session=None):
         self.write_db = session
         self.read_db = None
-        self.kafka_consumer = OrderKafkaConsumer(
-            bootstrap_servers=os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka-service:9092'),
-            group_id=os.getenv('KAFKA_CONSUMER_GROUP', 'order-service-group')
-        )
         self.user_client = UserClient()
         self.product_client = ProductClient()
         self.max_retries = 3
@@ -616,11 +610,3 @@ class OrderManager:
             await self.read_db.close()
         await self.product_client.close()
         await self.user_client.close()
-
-    async def start_kafka_consumer(self):
-        """Start Kafka consumer in the background"""
-        await self.kafka_consumer.start()
-
-    async def stop_kafka_consumer(self):
-        """Stop Kafka consumer"""
-        await self.kafka_consumer.stop()

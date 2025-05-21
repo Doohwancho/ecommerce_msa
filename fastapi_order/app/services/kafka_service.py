@@ -57,13 +57,13 @@ async def init_kafka_consumer():
     )
     
     # Consumer 시작
-    kafka_consumer.start()
+    await kafka_consumer.start()
     logger.info(f"Kafka consumer started, listening to topic: {PAYMENT_TOPIC} for payment events")
 
 async def stop_kafka_consumer():
     """Kafka Consumer를 종료합니다."""
     global kafka_consumer
     if kafka_consumer:
-        kafka_consumer.stop()
+        await kafka_consumer.stop()
         kafka_consumer = None
         logger.info("Kafka consumer stopped")

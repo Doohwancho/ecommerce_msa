@@ -1,5 +1,5 @@
 # app/config/kafka_consumer.py
-from kafka import KafkaConsumer
+from aiokafka import AIOKafkaConsumer
 import json
 import asyncio
 import logging
@@ -27,111 +27,112 @@ class OrderKafkaConsumer:
         self.handlers[topic][event_type] = handler
         logger.info(f"Registered handler for topic: {topic}, event_type: {event_type}")
         
-    def _get_consumer(self):
-        """KafkaConsumer 인스턴스를 생성하고 반환합니다."""
-        return KafkaConsumer(
+    async def _get_consumer(self):
+        """AIOKafkaConsumer 인스턴스를 생성하고 반환합니다."""
+        return AIOKafkaConsumer(
             *self.handlers.keys(),  # 등록된 모든 핸들러의 토픽을 구독
             bootstrap_servers=self.bootstrap_servers,
             group_id=self.group_id,
-            auto_offset_reset='latest',  # 가장 초기 오프셋부터 시작
-            enable_auto_commit=False,  # 수동 커밋 모드
+            auto_offset_reset='latest',
+            enable_auto_commit=False,
             value_deserializer=lambda x: json.loads(x.decode('utf-8'))
         )
 
-    def _consume_loop(self):
-        """Kafka 소비 루프 - 별도 스레드에서 실행됩니다."""
-        self.consumer = self._get_consumer()
+    async def _consume_loop(self):
+        """Kafka 소비 루프 - 비동기로 실행됩니다."""
+        self.consumer = await self._get_consumer()
+        await self.consumer.start()
         logger.info(f"Kafka consumer started. Subscribed to topics: {list(self.handlers.keys())}")
         
         try:
-            while self.running:
-                records = self.consumer.poll(timeout_ms=1000)
-                
-                if not records:
-                    continue
+            async for message in self.consumer:
+                if not self.running:
+                    break
                     
-                for topic_partition, messages in records.items():
-                    topic = topic_partition.topic
-                    if topic in self.handlers:
-                        for message in messages:
+                topic = message.topic
+                if topic in self.handlers:
+                    try:
+                        logger.info(f"Received message from topic: {topic}")
+                        
+                        # 1. 메시지 헤더에서 eventType 확인
+                        event_type = None
+                        
+                        # 메시지 헤더가 있는지 확인
+                        if message.headers:
+                            for key, value in message.headers:
+                                if key == 'eventType':
+                                    event_type = value.decode('utf-8')
+                                    logger.info(f"Found event_type in message header: {event_type}")
+                                    break
+                        
+                        # 2. 메시지 본문 처리
+                        msg_value = message.value
+                        
+                        # 메시지가 딕셔너리인지 확인
+                        if not isinstance(msg_value, dict):
+                            logger.error(f"Message is not a dictionary: {type(msg_value)}")
+                            await self.consumer.commit()
+                            continue
+                        
+                        # payload 필드 확인
+                        if 'payload' not in msg_value:
+                            logger.error("Message does not contain 'payload' field")
+                            await self.consumer.commit()
+                            continue
+                        
+                        # payload 처리
+                        payload_data = msg_value['payload']
+                        logger.info(f"Payload data type: {type(payload_data)}")
+                        
+                        # payload가 문자열이면 JSON으로 파싱
+                        if isinstance(payload_data, str):
                             try:
-                                logger.info(f"Received message from topic: {topic}")
-                                
-                                # 1. 메시지 헤더에서 eventType 확인
-                                event_type = None
-                                
-                                # 메시지 헤더가 있는지 확인
-                                if hasattr(message, 'headers') and message.headers:
-                                    for key, value in message.headers:
-                                        if key == 'eventType':
-                                            event_type = value.decode('utf-8')
-                                            logger.info(f"Found event_type in message header: {event_type}")
-                                            break
-                                
-                                # 2. 메시지 본문 처리
-                                msg_value = message.value
-                                
-                                # 메시지가 딕셔너리인지 확인
-                                if not isinstance(msg_value, dict):
-                                    logger.error(f"Message is not a dictionary: {type(msg_value)}")
-                                    self.consumer.commit()
-                                    continue
-                                
-                                # payload 필드 확인
-                                if 'payload' not in msg_value:
-                                    logger.error("Message does not contain 'payload' field")
-                                    self.consumer.commit()
-                                    continue
-                                
-                                # payload 처리
-                                payload_data = msg_value['payload']
-                                logger.info(f"Payload data type: {type(payload_data)}")
-                                
-                                # payload가 문자열이면 JSON으로 파싱
-                                if isinstance(payload_data, str):
-                                    try:
-                                        parsed_payload = json.loads(payload_data)
-                                        logger.info(f"Successfully parsed payload string to JSON")
-                                    except json.JSONDecodeError as e:
-                                        logger.error(f"Failed to parse payload string: {str(e)}")
-                                        self.consumer.commit()
-                                        continue
-                                else:
-                                    logger.error(f"Payload is not a string: {type(payload_data)}")
-                                    self.consumer.commit()
-                                    continue
-                                
-                                # 3. 이벤트 타입 결정
-                                # 헤더에서 이벤트 타입을 찾지 못한 경우에만 payload에서 확인
-                                if not event_type and isinstance(parsed_payload, dict) and 'type' in parsed_payload:
-                                    event_type = parsed_payload['type']
-                                    logger.info(f"Found event_type in payload: {event_type}")
-                                
-                                # 이벤트 타입 결정 실패 시 에러 로깅 후 건너뜀
-                                if not event_type:
-                                    logger.error(f"No event_type found in message for topic {topic}")
-                                    self.consumer.commit()
-                                    continue
-                                
-                                # 4. 핸들러 확인 및 메시지 큐에 추가
-                                if event_type in self.handlers[topic]:
-                                    self.message_queue.put((topic, event_type, parsed_payload))
-                                    logger.info(f"Added message to queue for processing: topic={topic}, event_type={event_type}")
-                                else:
-                                    logger.warning(f"No handler registered for event_type: {event_type} in topic: {topic}")
-                                
-                                # 메시지 처리 완료 후 커밋
-                                self.consumer.commit()
-                                
+                                parsed_payload = json.loads(payload_data)
+                                logger.info(f"Successfully parsed payload string to JSON")
+                            except json.JSONDecodeError as e:
+                                logger.error(f"Failed to parse payload string: {str(e)}")
+                                await self.consumer.commit()
+                                continue
+                        else:
+                            logger.error(f"Payload is not a string: {type(payload_data)}")
+                            await self.consumer.commit()
+                            continue
+                        
+                        # 3. 이벤트 타입 결정
+                        # 헤더에서 이벤트 타입을 찾지 못한 경우에만 payload에서 확인
+                        if not event_type and isinstance(parsed_payload, dict) and 'type' in parsed_payload:
+                            event_type = parsed_payload['type']
+                            logger.info(f"Found event_type in payload: {event_type}")
+                        
+                        # 이벤트 타입 결정 실패 시 에러 로깅 후 건너뜀
+                        if not event_type:
+                            logger.error(f"No event_type found in message for topic {topic}")
+                            await self.consumer.commit()
+                            continue
+                        
+                        # 4. 핸들러 실행
+                        if event_type in self.handlers[topic]:
+                            handler = self.handlers[topic][event_type]
+                            try:
+                                await handler(parsed_payload)
+                                logger.info(f"Successfully processed message from topic {topic}, event_type {event_type}")
                             except Exception as e:
-                                logger.error(f"Error processing message from topic {topic}: {str(e)}", exc_info=True)
-                                # 오류가 있어도 커밋
-                                self.consumer.commit()
+                                logger.error(f"Error in handler for topic {topic}, event_type {event_type}: {str(e)}")
+                        else:
+                            logger.warning(f"No handler registered for event_type: {event_type} in topic: {topic}")
+                        
+                        # 메시지 처리 완료 후 커밋
+                        await self.consumer.commit()
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing message from topic {topic}: {str(e)}", exc_info=True)
+                        # 오류가 있어도 커밋
+                        await self.consumer.commit()
         except Exception as e:
             logger.error(f"Error in Kafka consumer loop: {str(e)}", exc_info=True)
         finally:
             if self.consumer:
-                self.consumer.close()
+                await self.consumer.stop()
                 logger.info("Kafka consumer closed")
     
     # 다른 메서드는 동일하게 유지
@@ -165,27 +166,20 @@ class OrderKafkaConsumer:
                 logger.error(f"Error processing messages: {str(e)}")
                 await asyncio.sleep(1)  # 오류 시 더 긴 대기
     
-    def start(self):
+    async def start(self):
         """Kafka 소비자를 시작합니다."""
-        # 기존 코드 유지
         if not self.handlers:
             logger.warning("No handlers registered. Consumer not started.")
             return
             
         self.running = True
-        # 별도 스레드에서 소비 루프 실행
-        self.consumer_thread = threading.Thread(target=self._consume_loop)
-        self.consumer_thread.daemon = True
-        self.consumer_thread.start()
-        logger.info("Kafka consumer thread started")
-        
-        # 메인 이벤트 루프에서 메시지 처리 태스크 시작
-        asyncio.create_task(self.process_messages())
+        # 비동기 소비 루프 시작
+        asyncio.create_task(self._consume_loop())
+        logger.info("Kafka consumer started")
     
-    def stop(self):
+    async def stop(self):
         """Kafka 소비자를 종료합니다."""
-        # 기존 코드 유지
         self.running = False
-        if self.consumer_thread:
-            self.consumer_thread.join(timeout=5.0)
-            logger.info("Kafka consumer thread stopped")
+        if self.consumer:
+            await self.consumer.stop()
+            logger.info("Kafka consumer stopped")
