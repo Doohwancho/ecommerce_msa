@@ -13,7 +13,7 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.grpc import GrpcInstrumentorClient
 from opentelemetry.instrumentation.pymongo import PymongoInstrumentor
 from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
-from opentelemetry.instrumentation.kafka import KafkaInstrumentor
+from opentelemetry.instrumentation.aiokafka import AIOKafkaInstrumentor
 from opentelemetry.instrumentation.elasticsearch import ElasticsearchInstrumentor
 
 
@@ -98,7 +98,7 @@ def setup_telemetry():
 
         # 메시징/검색 계측기들 (Kafka, Elasticsearch 등)
         # 이놈들이 Kafka/ES 상호작용 스팬을 만든다
-        KafkaInstrumentor().instrument()
+        AIOKafkaInstrumentor().instrument() 
         ElasticsearchInstrumentor().instrument()
 
         # 필요한 다른 계측기들도 여기에 추가
