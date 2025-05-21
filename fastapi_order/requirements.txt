@@ -22,8 +22,6 @@ opentelemetry-semantic-conventions==0.54b0
 opentelemetry-instrumentation==0.54b0
 opentelemetry-instrumentation-fastapi==0.54b0
 opentelemetry-instrumentation-grpc==0.54b0
-opentelemetry-instrumentation-pymongo==0.54b0
 opentelemetry-instrumentation-sqlalchemy==0.54b0
 opentelemetry-instrumentation-aiokafka~=0.54b0 
-opentelemetry-instrumentation-elasticsearch==0.54b0
 opentelemetry-instrumentation-logging==0.54b0
