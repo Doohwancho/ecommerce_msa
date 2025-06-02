@@ -24,6 +24,10 @@ from fastapi.responses import JSONResponse
 # logging.basicConfig(level=logging.INFO) # 이미 설정되어 있다면 중복 호출 방지
 logger = logging.getLogger(__name__)
 
+# uvicorn access 로그만 WARNING 레벨로 설정
+uvicorn_access_logger = logging.getLogger("uvicorn.access")
+uvicorn_access_logger.setLevel(logging.WARNING)
+
 
 # --- OpenTelemetry 초기화 ---
 # 1. OpenTelemetry 기본 설정 실행 (다른 자동 계측기 포함, FastAPI 제외)

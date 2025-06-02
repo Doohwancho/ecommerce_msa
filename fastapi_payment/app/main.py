@@ -10,6 +10,15 @@ from contextlib import asynccontextmanager
 from app.config.payment_logging import logger
 from sqlalchemy import text
 import os
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# uvicorn access 로그만 WARNING 레벨로 설정
+uvicorn_access_logger = logging.getLogger("uvicorn.access")
+uvicorn_access_logger.setLevel(logging.WARNING)
 
 async def safe_create_tables_if_not_exist(conn):
     """테이블이 존재하지 않는 경우에만 생성"""

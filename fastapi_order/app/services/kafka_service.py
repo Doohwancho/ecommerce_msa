@@ -1,5 +1,5 @@
 import os
-from app.config.kafka_consumer import OrderKafkaConsumer # OrderKafkaConsumer는 이미 OTel 친화적으로 수정되었다고 가정
+from app.config.kafka_consumer import OrderModuleKafkaConsumer # OrderKafkaConsumer는 이미 OTel 친화적으로 수정되었다고 가정
 from app.services.order_manager import OrderManager
 from app.config.database import AsyncSessionLocal # SQLAlchemyInstrumentor가 DB 세션 자동 계측
 import logging
@@ -17,7 +17,7 @@ tracer = trace.get_tracer(__name__) # 모듈 레벨 트레이서 가져오기
 # Kafka 설정
 KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka-service:9092')
 KAFKA_CONSUMER_GROUP = os.getenv('KAFKA_CONSUMER_GROUP', 'order-service-group')
-PAYMENT_TOPIC = 'payment'  # Payment 서비스의 토픽
+PAYMENT_EVENTS_TOPIC = os.getenv('PAYMENT_EVENTS_TOPIC', 'dbserver.payment') # Topic where payment_success/failed are published
 
 # 글로벌 변수로 Kafka Consumer 인스턴스 유지
 kafka_consumer = None
@@ -89,54 +89,57 @@ async def init_kafka_consumer():
     """Kafka Consumer를 초기화하고 시작합니다. OTel 트레이싱 적용."""
     global kafka_consumer
     
-    # 이 함수 자체의 실행을 추적하기 위한 스팬
-    with tracer.start_as_current_span("InitKafkaConsumer") as span:
+    with tracer.start_as_current_span("InitOrderKafkaConsumer") as span: # 스팬 이름 명확화
         span.set_attribute(SpanAttributes.MESSAGING_SYSTEM, "kafka")
         span.set_attribute(SpanAttributes.MESSAGING_KAFKA_CONSUMER_GROUP, KAFKA_CONSUMER_GROUP)
         span.set_attribute("app.kafka.bootstrap_servers", KAFKA_BOOTSTRAP_SERVERS)
-        span.set_attribute("app.kafka.target_topics", PAYMENT_TOPIC)
+        # OrderModule은 payment 이벤트를 구독하므로, 구독 대상 토픽은 PAYMENT_EVENTS_TOPIC
+        span.set_attribute("app.kafka.subscribed_topics_for_order_module", PAYMENT_EVENTS_TOPIC) 
 
         if kafka_consumer is not None:
-            logger.info("Kafka consumer already initialized and running.")
-            span.add_event("ConsumerAlreadyInitialized")
+            logger.info("OrderModule Kafka consumer already initialized.")
+            span.add_event("OrderModuleConsumerAlreadyInitialized")
             span.set_status(Status(StatusCode.OK, "Already initialized"))
             return
         
         try:
-            kafka_consumer = OrderKafkaConsumer(
+            kafka_consumer = OrderModuleKafkaConsumer( # OrderModuleKafkaConsumer 사용
                 bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
                 group_id=KAFKA_CONSUMER_GROUP
+                # topics 인자는 OrderModuleKafkaConsumer.__init__에서 사용하지 않고,
+                # start 메소드에서 self.handlers.keys()로 구독함.
             )
             
-            # OrderKafkaConsumer.register_handler 내부에서도 필요하다면 스팬을 추가할 수 있지만,
-            # 여기서는 init_kafka_consumer 스팬의 이벤트로 기록
-            span.add_event("RegisteringHandlers", {"topic": PAYMENT_TOPIC})
+            # OrderManager 인스턴스는 핸들러 내부에서 DB 작업을 위해 필요할 수 있으므로,
+            # 래퍼 함수 내부에서 생성하거나, OrderManager 메소드를 직접 핸들러로 등록.
+            # 여기서는 래퍼 함수를 사용하고 있으므로, OrderManager 인스턴스가 래퍼 내부에서 생성됨.
+
+            span.add_event("RegisteringHandlersForOrderModule", {"consuming_topic": PAYMENT_EVENTS_TOPIC})
 
             kafka_consumer.register_handler(
-                PAYMENT_TOPIC, 
-                handle_payment_success_wrapper, # 이 핸들러들은 자체적으로 내부 스팬을 생성
-                event_type='payment_success'
+                topic=PAYMENT_EVENTS_TOPIC,  # 첫 번째 인자: topic
+                event_type='payment_success', # 두 번째 인자: event_type (문자열)
+                handler=handle_payment_success_wrapper # 세 번째 인자: handler (실제 호출될 함수)
             )
-            span.add_event("RegisteredHandler", {"event_type": "payment_success"})
+            span.add_event("RegisteredHandlerForOrderModule", {"event_type": "payment_success"})
             
             kafka_consumer.register_handler(
-                PAYMENT_TOPIC, 
-                handle_payment_failed_wrapper, # 이 핸들러들은 자체적으로 내부 스팬을 생성
-                event_type='payment_failed'
+                topic=PAYMENT_EVENTS_TOPIC, 
+                event_type='payment_failed',
+                handler=handle_payment_failed_wrapper
             )
-            span.add_event("RegisteredHandler", {"event_type": "payment_failed"})
+            span.add_event("RegisteredHandlerForOrderModule", {"event_type": "payment_failed"})
             
-            await kafka_consumer.start() # OrderKafkaConsumer.start() 내부에도 자체 스팬이 있을 수 있음
+            await kafka_consumer.start()
             
-            logger.info(f"Kafka consumer started, listening to topic: {PAYMENT_TOPIC} for payment events")
+            logger.info(f"OrderModule Kafka consumer started, listening to topic: {PAYMENT_EVENTS_TOPIC} for payment events")
             span.set_status(Status(StatusCode.OK))
 
         except Exception as e:
-            logger.error(f"Failed to initialize Kafka consumer: {e}", exc_info=True)
+            logger.error(f"Failed to initialize OrderModule Kafka consumer: {e}", exc_info=True)
             if span.is_recording():
                 span.record_exception(e)
-                span.set_status(Status(StatusCode.ERROR, f"Kafka consumer initialization failed: {str(e)}"))
-            # 초기화 실패 시 kafka_consumer를 None으로 유지하거나, 에러를 다시 발생시킬 수 있음
+                span.set_status(Status(StatusCode.ERROR, f"Order Kafka consumer init failed: {str(e)}"))
             kafka_consumer = None 
             raise
 

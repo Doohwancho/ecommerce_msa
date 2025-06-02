@@ -4,9 +4,11 @@ from sqlalchemy.orm import selectinload
 from app.models.order import Order, OrderItem, OrderStatus
 from app.models.outbox import Outbox
 from app.models.failed_event import FailedEvent
+
 from app.schemas.order import OrderCreate, OrderItemCreate, OrderUpdate
 from app.grpc.product_client import ProductClient # GrpcInstrumentorClient가 자동 계측 가정
 from app.grpc.user_client import UserClient # GrpcInstrumentorClient가 자동 계측 가정
+
 from fastapi import HTTPException # BackgroundTasks는 현재 사용되지 않음
 import asyncio
 import logging
@@ -20,7 +22,7 @@ from app.config.database import WriteSessionLocal, ReadSessionLocal # SQLAlchemy
 import os
 
 # OpenTelemetry API 임포트
-from opentelemetry import trace
+from opentelemetry import trace, propagate
 from opentelemetry.trace import Status, StatusCode
 from opentelemetry.semconv.trace import SpanAttributes # 시맨틱 컨벤션
 
@@ -196,22 +198,41 @@ class OrderManager:
                         db.add(order_item)
                         logger.info(f"Order item created for product {item_data.product_id}")
                     
-                    # Outbox 이벤트 생성
+                    # context propagation (opentelemetry-tracing for 분리된 모듈의 비동기 통신, CDC -> kafka)
+                    # 현재 활성화된 스팬(OrderManager.create_order)의 컨텍스트를 가져옴
+                    current_otel_span = trace.get_current_span() 
+                    # 주입할 컨텍스트 생성 (현재 스팬을 포함)
+                    context_to_propagate = trace.set_span_in_context(current_otel_span)
+                    
+                    carrier = {} # W3C Trace Context 헤더를 담을 딕셔너리
+                    # 전역 프로파게이터 (기본적으로 W3C TraceContextTextMapPropagator)를 사용하여 컨텍스트 주입
+                    propagator = propagate.get_global_textmap()
+                    propagator.inject(carrier, context=context_to_propagate)
+                    # 이제 carrier는 {'traceparent': '...', 'tracestate': '...'} 와 같은 값을 가짐
+
+                    span.add_event("TraceContextInjectedToCarrierForOutbox", 
+                               {"traceparent": carrier.get('traceparent'), "tracestate": carrier.get('tracestate')})
+
+                    
+                    # Outbox 이벤트 페이로드에 주입된 컨텍스트(carrier) 포함
                     order_created_event_payload = {
-                        'type': "order_created", # 이벤트 타입
+                        'type': "order_created",
                         'order_id': str(order.order_id),
                         'user_id': order.user_id,
                         'total_amount': total_amount,
                         'status': OrderStatus.PENDING.value,
                         'items': order_items_payload,
-                        'created_at': datetime.datetime.utcnow().isoformat() # 일관성을 위해 order.created_at 사용 고려
+                        'created_at': datetime.datetime.utcnow().isoformat(),
                     }
+
                     outbox_event = Outbox(
                         id=str(uuid.uuid4()),
                         aggregatetype="order",
                         aggregateid=str(order.order_id),
                         type="order_created", # Kafka 메시지 헤더의 eventType으로 사용될 수 있음
-                        payload=order_created_event_payload 
+                        payload=order_created_event_payload,
+                        traceparent_for_header=carrier.get('traceparent'), 
+                        tracestate_for_header=carrier.get('tracestate')
                     )
                     db.add(outbox_event)
                     logger.info(f"Outbox event created for order {order.order_id}")
@@ -268,6 +289,15 @@ class OrderManager:
                 span.set_attribute("app.event.type", "payment_success")
                 span.set_attribute("app.event.data_preview", original_event_data_str[:256])
 
+                current_otel_span_for_outbox = trace.get_current_span()
+                context_to_propagate_for_outbox = trace.set_span_in_context(current_otel_span_for_outbox)
+                carrier_for_outbox = {}
+                propagator_instance = propagate.get_global_textmap() # 전역 설정된 W3C 전파기 사용
+                propagator_instance.inject(carrier_for_outbox, context=context_to_propagate_for_outbox)
+                span.add_event("TraceContextInjectedToCarrierForOrderOutbox", 
+                               {"traceparent": carrier_for_outbox.get('traceparent')})
+
+
                 order_id = event_data.get('order_id')
                 payment_id = event_data.get('payment_id')
                 span.set_attribute("app.order_id", str(order_id))
@@ -286,6 +316,7 @@ class OrderManager:
                 retry_count = 0
                 while retry_count <= self.max_retries: # <= 로 변경하여 max_retries 포함 (0부터 시작)
                     span.add_event(f"ProcessingAttempt", {"retry.count": retry_count})
+
                     try:
                         db = await self._get_write_db()
                         async with db.begin(): # 트랜잭션
@@ -325,7 +356,9 @@ class OrderManager:
                             }
                             outbox_event = Outbox(
                                 id=str(uuid.uuid4()), aggregatetype="order", aggregateid=str(order.order_id),
-                                type="order_success", payload=order_success_event_payload
+                                type="order_success", payload=order_success_event_payload,
+                                traceparent_for_header=carrier_for_outbox.get('traceparent'),
+                                tracestate_for_header=carrier_for_outbox.get('tracestate')
                             )
                             db.add(outbox_event)
                             span.add_event("OutboxEventOrderSuccessPrepared")
@@ -365,7 +398,15 @@ class OrderManager:
             span.set_attribute("app.event.type", "payment_failed")
             span.set_attribute("app.event.data_preview", original_event_data_str[:256])
 
+            current_otel_span = trace.get_current_span()
+            context_to_propagate = trace.set_span_in_context(current_otel_span)
+            carrier = {}
+            propagator_instance = propagate.get_global_textmap()
+            propagator_instance.inject(carrier, context=context_to_propagate)
+            span.add_event("TraceContextInjectedToCarrierForOrderFailedOutbox", {"traceparent": carrier.get('traceparent')})
+
             parsed_event_data = event_data # 이미 wrapper에서 파싱되었을 수 있으나, 여기서 다시 확인/처리
+
             try:
                 # Debezium 메시지 처리 (필요한 경우) / event_data가 이미 payload일 수 있음
                 if 'payload' in parsed_event_data and isinstance(parsed_event_data['payload'], (dict, str)):
@@ -420,7 +461,9 @@ class OrderManager:
                     }
                     outbox_event = Outbox(
                         id=str(uuid.uuid4()), aggregatetype="order", aggregateid=str(order.order_id),
-                        type="order_failed", payload=order_failed_event_payload
+                        type="order_failed", payload=order_failed_event_payload,
+                        traceparent_for_header=carrier.get('traceparent'), 
+                        tracestate_for_header=carrier.get('tracestate')
                     )
                     db.add(outbox_event)
                     span.add_event("OutboxEventOrderFailedPrepared")

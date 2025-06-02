@@ -25,6 +25,17 @@ from app.config.elasticsearch import elasticsearch_config
 from app.config.otel import setup_telemetry
 from fastapi.responses import JSONResponse
 
+import logging 
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# uvicorn access 로그만 WARNING 레벨로 설정
+uvicorn_access_logger = logging.getLogger("uvicorn.access")
+uvicorn_access_logger.setLevel(logging.WARNING)
+
+
 # Initialize OTel tracer for this module
 tracer = trace.get_tracer("app.main")
 

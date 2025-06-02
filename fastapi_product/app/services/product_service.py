@@ -3,6 +3,9 @@ from bson import ObjectId
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+import sqlalchemy.exc
+import pymysql.err
+import asyncio
 
 from app.config.elasticsearch import elasticsearch_config
 from app.schemas.product import ProductCreate, ProductUpdate, ProductResponse, ProductsExistResponse, ProductInventoryResponse
@@ -95,74 +98,85 @@ class ProductService:
             span.set_attribute("app.product.request.sku", product.sku)
             span.set_attribute("app.product.request.brand", product.brand)
             product_id = None # Initialize to handle potential early exit
+            max_retries = 3
+            retry_count = 0
 
-            try:
-                # MongoDB write
-                product_dict = product.dict()
-                current_time_iso = datetime.now(timezone.utc).isoformat()
-                product_dict["created_at"] = current_time_iso
-                product_dict["updated_at"] = current_time_iso
-                
-                mongo_payload = product_dict.copy()
-                if "stock" in mongo_payload: # MongoDB에서는 stock 정보 제외
-                    del mongo_payload["stock"]
-                
-                span.add_event("Attempting MongoDB insert")
-                collection = await self._get_write_collection()
-                # PymongoInstrumentor traces insert_one
-                result = await collection.insert_one(mongo_payload)
-                product_id = str(result.inserted_id)
-                span.set_attribute("app.product.id", product_id) # Set product_id as soon as available
-                span.set_attribute(SpanAttributes.DB_MONGODB_COLLECTION, collection.name)
-                logger.info(f"Product {product_id} created in MongoDB.")
-                span.add_event("MongoDB insert successful", {"mongodb.document_id": product_id})
+            while retry_count < max_retries:
+                try:
+                    # MongoDB write
+                    product_dict = product.dict()
+                    current_time_iso = datetime.now(timezone.utc).isoformat()
+                    product_dict["created_at"] = current_time_iso
+                    product_dict["updated_at"] = current_time_iso
+                    
+                    mongo_payload = product_dict.copy()
+                    if "stock" in mongo_payload: # MongoDB에서는 stock 정보 제외
+                        del mongo_payload["stock"]
+                    
+                    span.add_event("Attempting MongoDB insert")
+                    collection = await self._get_write_collection()
+                    # PymongoInstrumentor traces insert_one
+                    result = await collection.insert_one(mongo_payload)
+                    product_id = str(result.inserted_id)
+                    span.set_attribute("app.product.id", product_id) # Set product_id as soon as available
+                    span.set_attribute(SpanAttributes.DB_MONGODB_COLLECTION, collection.name)
+                    logger.info(f"Product {product_id} created in MongoDB.")
+                    span.add_event("MongoDB insert successful", {"mongodb.document_id": product_id})
 
-                # MySQL write
-                span.add_event("Attempting MySQL insert")
-                db = await self._get_write_db()
-                # SQLAlchemyInstrumentor traces execute, commit, refresh
-                
-                # Check if product_id already exists in MySQL to prevent unique constraint violation
-                # This select for update also locks the potential row or gap.
-                stmt_check = select(MySQLProduct).where(MySQLProduct.product_id == product_id).with_for_update()
-                existing_result = await db.execute(stmt_check)
-                if existing_result.scalar_one_or_none():
-                    error_msg = f"IntegrityError: Product with ID {product_id} (from MongoDB) already exists in MySQL."
-                    logger.error(error_msg)
-                    span.set_attribute("app.error.type", "data_integrity_violation")
-                    span.set_status(Status(StatusCode.ERROR, error_msg))
-                    # This is a critical data consistency issue, might require specific error handling or cleanup.
-                    raise ValueError(error_msg) # Or a custom exception
+                    # MySQL write
+                    span.add_event("Attempting MySQL insert")
+                    db = await self._get_write_db()
+                    
+                    # Start MySQL transaction
+                    async with db.begin():
+                        # Check if product_id already exists in MySQL
+                        stmt_check = select(MySQLProduct).where(MySQLProduct.product_id == product_id)
+                        existing_result = await db.execute(stmt_check)
+                        if existing_result.scalar_one_or_none():
+                            error_msg = f"IntegrityError: Product with ID {product_id} (from MongoDB) already exists in MySQL."
+                            logger.error(error_msg)
+                            span.set_attribute("app.error.type", "data_integrity_violation")
+                            span.set_status(Status(StatusCode.ERROR, error_msg))
+                            raise ValueError(error_msg)
 
-                mysql_product = MySQLProduct(
-                    product_id=product_id,
-                    title=product.title,
-                    description=product.description,
-                    price=int(product.price.amount),
-                    stock=product.stock,
-                    stock_reserved=0,
-                    created_at=datetime.now(timezone.utc) # Ensure UTC for DB
-                )
-                db.add(mysql_product)
-                await db.commit()
-                await db.refresh(mysql_product) # To get any DB-generated fields like auto-updated 'updated_at'
-                logger.info(f"Product {product_id} created in MySQL.")
-                span.add_event("MySQL insert successful")
-                
-                span.set_status(Status(StatusCode.OK))
-                logger.info(f"Product {product_id} created successfully in both MongoDB and MySQL.")
-                
-                response_data = mongo_payload.copy() # Start with MongoDB data (stock excluded)
-                response_data["product_id"] = product_id
-                return ProductResponse(**response_data)
+                        mysql_product = MySQLProduct(
+                            product_id=product_id,
+                            title=product.title,
+                            description=product.description,
+                            price=int(product.price.amount),
+                            stock=product.stock,
+                            stock_reserved=0,
+                            created_at=datetime.now(timezone.utc)
+                        )
+                        db.add(mysql_product)
+                        # Transaction will be committed automatically when exiting the context
 
-            except Exception as e:
-                error_message = f"Error creating product (ID attempt: {product_id if product_id else 'N/A'}): {str(e)}"
-                logger.error(error_message, exc_info=True)
-                span.record_exception(e)
-                span.set_status(Status(StatusCode.ERROR, description=error_message))
-                # Re-raise to be handled by the API layer (which should convert to HTTPException)
-                raise # Consider wrapping in a service-specific exception if needed
+                    logger.info(f"Product {product_id} created in MySQL.")
+                    span.add_event("MySQL insert successful")
+                    
+                    span.set_status(Status(StatusCode.OK))
+                    logger.info(f"Product {product_id} created successfully in both MongoDB and MySQL.")
+                    
+                    response_data = mongo_payload.copy() # Start with MongoDB data (stock excluded)
+                    response_data["product_id"] = product_id
+                    return ProductResponse(**response_data)
+
+                except Exception as e:
+                    error_message = f"Error creating product (ID attempt: {product_id if product_id else 'N/A'}): {str(e)}"
+                    logger.error(error_message, exc_info=True)
+                    span.record_exception(e)
+                    
+                    # Check if it's a lock timeout error
+                    if isinstance(e, (sqlalchemy.exc.OperationalError, pymysql.err.OperationalError)) and e.orig.args[0] == 1205:
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            wait_time = 0.1 * (2 ** retry_count)  # Exponential backoff
+                            logger.warning(f"Lock timeout occurred, retrying in {wait_time} seconds (attempt {retry_count}/{max_retries})")
+                            await asyncio.sleep(wait_time)
+                            continue
+                    
+                    span.set_status(Status(StatusCode.ERROR, description=error_message))
+                    raise  # Re-raise if not a lock timeout or max retries exceeded
 
     async def get_product(self, product_id: str) -> Optional[ProductResponse]:
         """제품 ID로 제품 조회 (Elasticsearch 먼저 시도, 없으면 MongoDB 조회)"""

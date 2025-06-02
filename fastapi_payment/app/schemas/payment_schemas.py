@@ -30,7 +30,7 @@ class PaymentBase(BaseModel):
 # 결제 생성 요청 스키마
 class PaymentCreate(PaymentBase):
     pass
-    stock_reserved: int = Field(..., description="Number of items reserved for this payment")
+    # stock_reserved: int = Field(..., description="Number of items reserved for this payment")
 
 # 결제 상태 업데이트 스키마
 class PaymentUpdate(BaseModel):

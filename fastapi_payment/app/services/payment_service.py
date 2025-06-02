@@ -10,6 +10,7 @@ import json
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode, SpanKind
 from opentelemetry.semconv.trace import SpanAttributes # 시맨틱 컨벤션
+from opentelemetry import propagate
 
 from app.schemas.payment_schemas import (
     PaymentBase, PaymentCreate, PaymentUpdate, PaymentResponse,
@@ -89,6 +90,22 @@ class PaymentService:
 
     async def create_payment(self, payment_data: PaymentCreate) -> PaymentResponse:
         """새로운 결제를 생성하고 Outbox 이벤트를 기록합니다."""
+        tracer = trace.get_tracer(__name__, "0.1.0") 
+        current_service_entry_span = trace.get_current_span()
+
+        if current_service_entry_span and current_service_entry_span.is_recording():
+            ctx = current_service_entry_span.get_span_context()
+            parent_span_id_hex = current_service_entry_span.parent.span_id if current_service_entry_span.parent else None
+            parent_span_id_str = f"{parent_span_id_hex:x}" if parent_span_id_hex else "None"
+            logger.info(
+                f"PaymentService.create_payment: ENTRY - TraceID={ctx.trace_id:x}, "
+                f"SpanID={ctx.span_id:x}, ParentSpanID={parent_span_id_str}, IsRemote={ctx.is_remote}"
+            )
+            # 여기서 ParentSpanID가 "PaymentManager.handle_order_created_logic" 스팬의 ID여야 해.
+            # 그리고 TraceID는 당연히 order-service부터 쭉 이어져 온 그 ID여야 하고!
+        else:
+            logger.warning("PaymentService.create_payment: No active/recording span at service entry.")
+
         with tracer.start_as_current_span("PaymentService.create_payment") as span:
             span.set_attribute("app.order_id", payment_data.order_id)
             span.set_attribute("app.payment.amount", payment_data.amount)
@@ -98,12 +115,12 @@ class PaymentService:
 
             try:
                 # SAGA 테스트용 실패 시뮬레이션
-                if payment_data.stock_reserved == 10: # payment_data에 stock_reserved가 있다고 가정
-                    sim_error_msg = "Simulated payment failure for SAGA (stock_reserved = 10)"
-                    logger.warning(sim_error_msg)
-                    span.set_attribute("app.payment.simulated_failure", True)
-                    span.set_attribute("app.payment.simulated_failure_reason", sim_error_msg)
-                    raise Exception(sim_error_msg) # 이 예외는 아래에서 잡힘
+                # if payment_data.stock_reserved == 10: # payment_data에 stock_reserved가 있다고 가정
+                #     sim_error_msg = "Simulated payment failure for SAGA (stock_reserved = 10)"
+                #     logger.warning(sim_error_msg)
+                #     span.set_attribute("app.payment.simulated_failure", True)
+                #     span.set_attribute("app.payment.simulated_failure_reason", sim_error_msg)
+                #     raise Exception(sim_error_msg) # 이 예외는 아래에서 잡힘
 
                 db_session = await self._get_write_db()
                 async with db_session.begin(): # 트랜잭션 시작 (SQLAlchemyInstrumentor가 감지 가능)
@@ -134,12 +151,28 @@ class PaymentService:
                         'payment_status': PaymentStatus.PENDING.value, # 생성 시점의 상태
                         'created_at': datetime.utcnow().isoformat() # 일관성을 위해 payment.created_at 사용 고려
                     }
+
+                    # 현재 활성화된 스팬의 컨텍스트를 가져옴
+                    current_otel_span = trace.get_current_span()
+                    # 주입할 컨텍스트 생성
+                    context_to_propagate = trace.set_span_in_context(current_otel_span)
+                    
+                    carrier = {}  # W3C Trace Context 헤더를 담을 딕셔너리
+                    # 전역 프로파게이터를 사용하여 컨텍스트 주입
+                    propagator = propagate.get_global_textmap()
+                    propagator.inject(carrier, context=context_to_propagate)
+
+                    span.add_event("TraceContextInjectedToCarrierForOutbox", 
+                               {"traceparent": carrier.get('traceparent'), "tracestate": carrier.get('tracestate')})
+
                     outbox_event = Outbox(
                         id=str(uuid.uuid4()),
                         aggregatetype="payment",
                         aggregateid=str(payment.payment_id),
                         type="payment_success", # Kafka 메시지 헤더의 eventType으로 사용될 수 있음
-                        payload=payment_event_payload
+                        payload=payment_event_payload,
+                        traceparent_for_header=carrier.get('traceparent'),
+                        tracestate_for_header=carrier.get('tracestate')
                     )
                     db_session.add(outbox_event)
                     span.add_event("OutboxEventPreparedForPayment", {"outbox.event.type": "payment_success"})

@@ -34,7 +34,7 @@ write_engine = create_async_engine(
     PRIMARY_URL,
     pool_pre_ping=True,
     pool_recycle=3600,
-    echo=True
+    echo=False
 )
 
 # 읽기 작업용 엔진 (Secondary)
@@ -43,7 +43,7 @@ read_engine = create_async_engine(
     SECONDARY_URL,
     pool_pre_ping=True,
     pool_recycle=3600,
-    echo=True
+    echo=False
 )
 
 engine = write_engine

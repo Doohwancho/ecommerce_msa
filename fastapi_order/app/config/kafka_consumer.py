@@ -1,217 +1,205 @@
-# app/config/kafka_consumer.py
+# fastapi-order/app/config/kafka_consumer.py
 from aiokafka import AIOKafkaConsumer
-import json
 import asyncio
+import json
 import logging
-from typing import Dict, Callable, Any # Optional 제거 (사용 안됨)
-# import queue # threading.Queue를 사용 중이므로 이 줄은 제거하거나 threading.Queue로 명확히
-import threading # _consume_loop가 async이므로 threading.Queue는 여기서는 부적합할 수 있음. asyncio.Queue 고려.
-                  # 현재 _consume_loop는 message_queue를 직접 사용하지 않고 바로 처리함. process_messages가 사용.
-                  # process_messages 메서드가 실제로 사용되는지, _consume_loop와 어떻게 연동되는지 확인 필요.
-                  # 여기서는 _consume_loop에 직접 OpenTelemetry 적용.
+from typing import Callable, Dict, List # List 추가
 
 from opentelemetry import trace
-# Semantic Conventions를 사용하면 더 명확합니다.
-# from opentelemetry.semconv.trace import SpanAttributes # 예시
+from opentelemetry.trace import Status, StatusCode # SpanKind는 자동 계측 시 직접 사용 줄임
+from opentelemetry.semconv.trace import SpanAttributes # 필요시 표준 속성 사용
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # 모듈 로거
 
-class OrderKafkaConsumer:
+class OrderModuleKafkaConsumer:
     def __init__(self, bootstrap_servers: str, group_id: str):
         self.bootstrap_servers = bootstrap_servers
         self.group_id = group_id
-        self.consumer = None
-        self.handlers: Dict[str, Dict[str, Callable]] = {}  # topic -> {event_type -> handler}
-        self.running = False
-        # self.consumer_thread = None # _consume_loop가 async이므로 별도 스레드 관리는 필요 없어 보임
-        # self.message_queue = queue.Queue() # _consume_loop에서 직접 처리하므로 일단 주석 처리
+        self.consumer: AIOKafkaConsumer = None
+        # 토픽별, 이벤트 타입별 핸들러 저장: Dict[topic_name, Dict[event_type, handler_callable]]
+        self.handlers: Dict[str, Dict[str, Callable]] = {}
+        self.tracer = trace.get_tracer("app.config.order_kafka_consumer.OrderModuleKafkaConsumer", "0.1.0")
+        self._running = False
+        logger.info(f"OrderModuleKafkaConsumer initialized for group '{self.group_id}'")
 
-    def register_handler(self, topic: str, handler: Callable, event_type: str = None):
+    def register_handler(self, topic: str, event_type: str, handler: Callable):
         if topic not in self.handlers:
             self.handlers[topic] = {}
         self.handlers[topic][event_type] = handler
-        logger.info(f"Registered handler for topic: {topic}, event_type: {event_type}")
-
-    async def _get_consumer(self):
-        return AIOKafkaConsumer(
-            *self.handlers.keys(),
-            bootstrap_servers=self.bootstrap_servers,
-            group_id=self.group_id,
-            auto_offset_reset='latest',
-            enable_auto_commit=False, # 수동 커밋 사용
-            value_deserializer=lambda x: json.loads(x.decode('utf-8')),
-            # AIOKafkaInstrumentor가 컨텍스트 전파를 위해 헤더를 사용합니다.
-            # key_deserializer도 필요하다면 설정
-        )
-
-    async def _consume_loop(self):
-        self.consumer = await self._get_consumer()
-        await self.consumer.start()
-        logger.info(f"Kafka consumer started. Subscribed to topics: {list(self.handlers.keys())}")
-
-        try:
-            async for message in self.consumer: # AIOKafkaInstrumentor가 이 루프의 각 메시지에 대해 스팬을 시작/종료
-                if not self.running:
-                    break
-                
-                # 현재 활성화된 스팬 (AIOKafkaInstrumentor가 생성) 가져오기
-                current_span = trace.get_current_span()
-
-                topic = message.topic
-                event_type = None # 여기서 초기화
-
-                try:
-                    logger.info(f"Received message from topic: {topic}")
-                    # 스팬에 기본 메시지 정보 추가
-                    if current_span.is_recording():
-                        current_span.set_attribute("messaging.system", "kafka")
-                        current_span.set_attribute("messaging.destination.name", topic) # Kafka 토픽 이름
-                        current_span.set_attribute("messaging.message.id", str(message.offset)) # 메시지 오프셋
-                        current_span.set_attribute("messaging.kafka.consumer.group", self.group_id)
-                        current_span.set_attribute("messaging.kafka.partition", message.partition)
-                        if message.key:
-                            current_span.set_attribute("messaging.kafka.message.key", message.key.decode() if isinstance(message.key, bytes) else str(message.key))
-
-                    # 1. 메시지 헤더에서 eventType 확인
-                    if message.headers:
-                        for key, value in message.headers:
-                            if key == 'eventType': # Debezium 또는 다른 프로듀서가 설정한 헤더
-                                event_type = value.decode('utf-8')
-                                logger.info(f"Found event_type in message header: {event_type}")
-                                if current_span.is_recording():
-                                    current_span.set_attribute("app.event_type_source", "header")
-                                break
-                    
-                    # 2. 메시지 본문 처리 (Debezium payload 등)
-                    msg_value = message.value # 이미 JSON 객체로 역직렬화됨
-                    
-                    if not isinstance(msg_value, dict):
-                        logger.error(f"Message value is not a dictionary: {type(msg_value)}")
-                        await self.consumer.commit({message.topic: message.offset}) # 특정 메시지만 커밋 (aiokafka 방식 확인 필요)
-                                                                                    # 또는 전체 배치를 커밋하는 로직에 따라 조정
-                        # AIOKafkaConsumer.commit()는 인자 없이 호출 시 마지막으로 반환된 모든 메시지 커밋
-                        await self.consumer.commit() 
-                        continue
-
-                    payload_data_str = msg_value.get('payload') # Debezium 메시지라면 'payload' 필드가 있을 것
-                    parsed_payload = None
-
-                    if payload_data_str is None:
-                        logger.warning("Message does not contain 'payload' field. Treating message value as payload.")
-                        # 페이로드가 없는 단순 JSON 메시지일 수 있음. 이 경우 msg_value 자체를 payload로 간주할 수 있음.
-                        parsed_payload = msg_value # 또는 에러 처리
-                    elif isinstance(payload_data_str, str):
-                        try:
-                            parsed_payload = json.loads(payload_data_str)
-                            logger.info(f"Successfully parsed payload string to JSON")
-                        except json.JSONDecodeError as e:
-                            logger.error(f"Failed to parse payload string: {str(e)}")
-                            if current_span.is_recording():
-                                current_span.record_exception(e)
-                                current_span.set_status(trace.Status(trace.StatusCode.ERROR, "Payload JSONDecodeError"))
-                            await self.consumer.commit()
-                            continue
-                    elif isinstance(payload_data_str, dict): # payload가 이미 객체인 경우
-                        parsed_payload = payload_data_str
-                        logger.info("Payload is already a dictionary.")
-                    else:
-                        logger.error(f"Payload is not a string or dict: {type(payload_data_str)}")
-                        if current_span.is_recording():
-                             current_span.set_status(trace.Status(trace.StatusCode.ERROR, "Invalid payload type"))
-                        await self.consumer.commit()
-                        continue
-
-                    # Debezium 관련 속성 추가 (parsed_payload가 Debezium 구조를 따른다고 가정)
-                    if isinstance(parsed_payload, dict) and current_span.is_recording():
-                        if "op" in parsed_payload: # Debezium operation (c, u, d, r)
-                            current_span.set_attribute("debezium.operation", parsed_payload["op"])
-                        if "source" in parsed_payload and isinstance(parsed_payload["source"], dict):
-                            source_info = parsed_payload["source"]
-                            if "db" in source_info:
-                                current_span.set_attribute("debezium.source.db", source_info["db"])
-                            if "table" in source_info:
-                                current_span.set_attribute("debezium.source.table", source_info["table"])
-                            if "connector" in source_info: # Debezium connector 이름
-                                current_span.set_attribute("debezium.source.connector", source_info["connector"])
-                    
-                    # 3. 이벤트 타입 결정 (헤더에 없었을 경우 payload에서)
-                    if not event_type and isinstance(parsed_payload, dict) and 'type' in parsed_payload:
-                        event_type = parsed_payload['type']
-                        logger.info(f"Found event_type in payload: {event_type}")
-                        if current_span.is_recording():
-                            current_span.set_attribute("app.event_type_source", "payload")
-                    
-                    if not event_type:
-                        logger.error(f"No event_type found in message for topic {topic}")
-                        if current_span.is_recording():
-                            current_span.set_status(trace.Status(trace.StatusCode.ERROR, "Missing event_type"))
-                        await self.consumer.commit()
-                        continue
-                    
-                    if current_span.is_recording():
-                        current_span.set_attribute("app.event_type", event_type) # 최종 결정된 event_type
-                        current_span.set_attribute("app.handler.topic", topic) # 핸들러 정보 명시
-
-                    # 4. 핸들러 실행
-                    if event_type in self.handlers.get(topic, {}):
-                        handler = self.handlers[topic][event_type]
-                        logger.info(f"Executing handler for topic {topic}, event_type {event_type}")
-                        await handler(parsed_payload) # 핸들러 내에서 추가적인 자식 스팬 생성 가능
-                        logger.info(f"Successfully processed message from topic {topic}, event_type {event_type}")
-                        # 성공 시 스팬 상태는 기본적으로 OK (별도 설정 불필요)
-                    else:
-                        logger.warning(f"No handler registered for event_type: {event_type} in topic: {topic}")
-                        if current_span.is_recording():
-                             current_span.set_status(trace.Status(trace.StatusCode.UNSET, f"No handler for event_type {event_type}"))
-
-
-                    await self.consumer.commit() # 성공적으로 처리 후 커밋
-
-                except Exception as e:
-                    logger.error(f"Error processing message from topic {topic}: {str(e)}", exc_info=True)
-                    if current_span.is_recording():
-                        current_span.record_exception(e) # 예외 기록
-                        current_span.set_status(trace.Status(trace.StatusCode.ERROR, str(e))) # 스팬 상태 ERROR로 설정
-                    
-                    # 오류 발생 시에도 커밋 (재처리 방지 또는 오류 큐 등으로 보내는 로직 고려)
-                    # 현재 로직은 오류 발생 시에도 커밋합니다. 필요에 따라 조정하세요.
-                    if self.consumer and message: # consumer와 message가 유효한지 확인
-                         await self.consumer.commit()
-        
-        except Exception as e:
-            logger.error(f"Critical error in Kafka consumer loop: {str(e)}", exc_info=True)
-            # 여기서 발생하는 예외는 루프 자체의 문제일 수 있으므로, 현재 스팬 컨텍스트가 없을 수 있음.
-            # 필요하다면 새로운 스팬을 만들어 에러 기록.
-        finally:
-            if self.consumer:
-                await self.consumer.stop()
-                logger.info("Kafka consumer closed")
+        logger.info(f"[{self.group_id}] Handler registered: topic='{topic}', event_type='{event_type}', handler='{handler.__name__}'")
 
     async def start(self):
-        if not self.handlers:
-            logger.warning("No handlers registered. Consumer not started.")
+        if self._running:
+            logger.warning(f"[{self.group_id}] OrderModuleKafkaConsumer.start called but already running.")
             return
-        
-        self.running = True
-        asyncio.create_task(self._consume_loop()) # 비동기 소비 루프 시작
-        logger.info("Kafka consumer task created")
+
+        subscribed_topics = list(self.handlers.keys())
+        if not subscribed_topics:
+            logger.warning(f"[{self.group_id}] No topics to subscribe to for OrderModule. Consumer not starting.")
+            return
+
+        with self.tracer.start_as_current_span(f"{self.group_id}.OrderModuleKafkaConsumer.start_instance") as span:
+            span.set_attribute("app.kafka.consumer_group", self.group_id)
+            span.set_attribute("app.kafka.bootstrap_servers", self.bootstrap_servers)
+            span.set_attribute("app.kafka.subscribed_topics", ",".join(subscribed_topics))
+            try:
+                self.consumer = AIOKafkaConsumer(
+                    *subscribed_topics, # 구독할 모든 토픽
+                    bootstrap_servers=self.bootstrap_servers,
+                    group_id=self.group_id,
+                    auto_offset_reset='latest',
+                    # value_deserializer: bytes -> str (JSON 파싱은 _consume_loop에서)
+                    value_deserializer=lambda m: m.decode('utf-8', errors='replace') if isinstance(m, (bytes, bytearray)) else str(m),
+                    enable_auto_commit=False # 수동 커밋
+                )
+                await self.consumer.start()
+                self._running = True
+                asyncio.create_task(self._consume_loop())
+                logger.info(f"[{self.group_id}] Kafka consumer task created for topics: {subscribed_topics}.")
+                span.set_status(Status(StatusCode.OK))
+            except Exception as e:
+                logger.error(f"[{self.group_id}] Failed to start OrderModuleKafkaConsumer: {e}", exc_info=True)
+                if span.is_recording():
+                    span.record_exception(e)
+                    span.set_status(Status(StatusCode.ERROR, f"KafkaConsumerStartFailed: {str(e)}"))
+                self._running = False
+                raise
+
+    async def _consume_loop(self):
+        if not self.consumer:
+            logger.error(f"[{self.group_id}] Consumer not initialized for OrderModule.")
+            return
+
+        logger.info(f"[{self.group_id}] Starting consumption loop for OrderModule, topics: {list(self.handlers.keys())}...")
+        try:
+            # AIOKafkaInstrumentor가 이 루프에서 각 메시지 수신 시 자동으로 CONSUMER 스팬을 생성하고,
+            # 메시지 헤더에서 traceparent를 읽어 컨텍스트를 활성화합니다.
+            async for msg in self.consumer:
+                # 현재 스팬은 AIOKafkaInstrumentor가 만든 CONSUMER 스팬이어야 합니다.
+                current_consumer_span = trace.get_current_span()
+                
+                logger.info(f"!!!!!!!!!! [{self.group_id}] ORDER-MODULE KAFKA MSG RECEIVED !!!!!!!!!!")
+                logger.info(f"[{self.group_id}] Topic={msg.topic}, Offset={msg.offset}, Key={msg.key.decode('utf-8', errors='ignore') if msg.key else 'N/A'}")
+
+                # AIOKafkaInstrumentor가 설정한 기본 속성에 추가적인 앱 레벨 속성을 더할 수 있습니다.
+                if current_consumer_span.is_recording():
+                    current_consumer_span.set_attribute(SpanAttributes.MESSAGING_MESSAGE_ID, str(msg.offset))
+                    # 기타 필요한 속성 추가
+
+                event_type_from_header = None
+                header_log_for_debug = {}
+                if msg.headers:
+                    for key, value_bytes in msg.headers:
+                        decoded_value = value_bytes.decode('utf-8', errors='replace') if value_bytes is not None else None
+                        header_log_for_debug[key] = decoded_value
+                        if key == 'eventType' and decoded_value: # Debezium SMT가 설정하는 표준 헤더명
+                            event_type_from_header = decoded_value
+                    logger.info(f"[{self.group_id}] Decoded Kafka Headers (OrderModule): {header_log_for_debug}")
+                    if current_consumer_span.is_recording() and event_type_from_header:
+                        current_consumer_span.set_attribute("app.kafka.header.eventType", event_type_from_header)
+                
+                raw_payload_str = msg.value # value_deserializer는 문자열로 변환
+                actual_message_payload = None
+
+                if isinstance(raw_payload_str, str):
+                    logger.info(f"[{self.group_id}] Raw string payload from Kafka (repr): {repr(raw_payload_str)}")
+                    try:
+                        parsed_payload = json.loads(raw_payload_str)
+                        if isinstance(parsed_payload, str): # 이중 인코딩 체크
+                            logger.warning(f"[{self.group_id}] Payload from topic {msg.topic} was double-encoded. Second parse attempt.")
+                            actual_message_payload = json.loads(parsed_payload)
+                        else:
+                            actual_message_payload = parsed_payload
+                    except json.JSONDecodeError as e_json:
+                        logger.error(f"[{self.group_id}] Failed to parse JSON from topic {msg.topic}. Raw: {raw_payload_str[:500]}, Error: {e_json}. Skipping.")
+                        if current_consumer_span.is_recording(): current_consumer_span.set_status(Status(StatusCode.ERROR, "Payload JSON parse failed"))
+                        await self.consumer.commit()
+                        continue
+                else: # value_deserializer가 문자열을 반환하지 않은 예외적 상황
+                    logger.error(f"[{self.group_id}] Expected string payload from deserializer for topic {msg.topic}, got {type(raw_payload_str)}. Skipping.")
+                    if current_consumer_span.is_recording(): current_consumer_span.set_status(Status(StatusCode.ERROR, "Payload not string from deserializer"))
+                    await self.consumer.commit()
+                    continue
+                
+                if not isinstance(actual_message_payload, dict):
+                    logger.error(f"[{self.group_id}] Final payload is NOT dict ({type(actual_message_payload)}) for topic {msg.topic}. Skipping.")
+                    if current_consumer_span.is_recording(): current_consumer_span.set_status(Status(StatusCode.ERROR, "Final payload not dict"))
+                    await self.consumer.commit()
+                    continue
+                
+                # 최종 이벤트 타입 결정
+                final_event_type = event_type_from_header or actual_message_payload.get('type')
+                
+                if not final_event_type:
+                    logger.error(f"[{self.group_id}] Could not determine event_type for topic {msg.topic}. Payload: {str(actual_message_payload)[:200]}. Skipping.")
+                    if current_consumer_span.is_recording(): current_consumer_span.set_status(Status(StatusCode.ERROR, "EventType missing in message"))
+                    await self.consumer.commit()
+                    continue
+                
+                if current_consumer_span.is_recording():
+                    current_consumer_span.set_attribute("app.event_type_resolved", final_event_type)
+                    # AIOKafkaInstrumentor가 생성한 스팬의 이름을 더 구체적으로 업데이트 할 수 있습니다.
+                    # current_consumer_span.update_name(f"{msg.topic} {final_event_type} process")
+
+                topic_handlers = self.handlers.get(msg.topic)
+                if not topic_handlers or final_event_type not in topic_handlers:
+                    logger.warning(f"[{self.group_id}] No handler for topic '{msg.topic}', event_type '{final_event_type}'. Skipping.")
+                    if current_consumer_span.is_recording(): current_consumer_span.set_status(Status(StatusCode.OK, f"NoHandlerFor_{final_event_type}"))
+                    await self.consumer.commit()
+                    continue
+                
+                handler_to_call = topic_handlers[final_event_type]
+
+                logger.info(f"[{self.group_id}] Calling handler '{handler_to_call.__name__}' for event '{final_event_type}' from topic '{msg.topic}'...")
+                try:
+                    # 핸들러는 AIOKafkaInstrumentor가 활성화한 컨텍스트 내에서 실행됩니다.
+                    # 핸들러 (예: OrderManager.handle_payment_success) 내부에서 생성하는 스팬은 자동으로 자식 스팬이 됩니다.
+                    await handler_to_call(actual_message_payload) 
+                    logger.info(f"[{self.group_id}] Handler for event '{final_event_type}' completed successfully.")
+                    if current_consumer_span.is_recording():
+                        current_consumer_span.set_status(Status(StatusCode.OK))
+                except Exception as e_handler:
+                    logger.error(f"[{self.group_id}] Error in handler '{handler_to_call.__name__}' for event '{final_event_type}': {e_handler}", exc_info=True)
+                    if current_consumer_span.is_recording():
+                        current_consumer_span.record_exception(e_handler)
+                        current_consumer_span.set_status(Status(StatusCode.ERROR, f"HandlerFailed: {str(e_handler)}"))
+                
+                await self.consumer.commit() # 메시지 처리 후 수동 커밋
+                logger.info(f"[{self.group_id}] Offset {msg.offset} committed for topic {msg.topic} after event '{final_event_type}'.")
+
+        except asyncio.CancelledError:
+            logger.info(f"Consume loop cancelled for group '{self.group_id}' in OrderModule.")
+        except Exception as e_loop:
+            logger.error(f"CRITICAL Kafka consumer loop error for group '{self.group_id}' in OrderModule: {e_loop}", exc_info=True)
+            self._running = False
+        finally:
+            logger.info(f"Consume loop ending for group '{self.group_id}' in OrderModule.")
+            if self._running:
+                await self.stop()
 
     async def stop(self):
-        self.running = False
-        # _consume_loop의 finally 블록에서 consumer.stop()이 호출되므로 여기서 중복 호출하지 않아도 될 수 있음.
-        # 하지만 명시적으로 호출하는 것이 안전할 수 있습니다.
-        if self.consumer and self.consumer._running: # consumer가 실행 중일 때만 stop 시도
-             try:
-                 await self.consumer.stop()
-             except Exception as e:
-                 logger.error(f"Error stopping kafka consumer: {e}", exc_info=True)
-        logger.info("Kafka consumer stop requested")
+        if not self._running and not self.consumer:
+            logger.info(f"[{self.group_id}] OrderModuleKafkaConsumer.stop called but not running or not initialized.")
+            return
+        
+        tracer_for_stop = self.tracer # Use existing tracer
+        with tracer_for_stop.start_as_current_span(f"{self.group_id}.OrderModuleKafkaConsumer.stop_instance") as span:
+            # ... (이전 payment_kafka.py의 stop 메서드와 동일한 로직)
+            try:
+                current_running_status = self._running
+                self._running = False 
 
-    # process_messages 메서드는 현재 _consume_loop와 직접 연동되지 않는 것으로 보입니다.
-    # 만약 이 메서드를 통해 메시지를 처리한다면, 해당 부분에도 컨텍스트 전파 및 스팬 관리가 필요합니다.
-    # 여기서는 _consume_loop에 집중했습니다.
-    async def process_messages(self):
-        # 이 메서드가 사용된다면, message_queue에 넣을 때와 꺼낼 때 컨텍스트 전파 필요
-        logger.warning("process_messages method is not directly integrated with OpenTelemetry in this example.")
-        # ... 기존 코드 ...
-        pass
+                if self.consumer:
+                    logger.info(f"[{self.group_id}] Stopping OrderModuleKafkaConsumer (was running: {current_running_status})...")
+                    await self.consumer.stop()
+                    logger.info(f"[{self.group_id}] OrderModuleKafkaConsumer stopped successfully.")
+                    self.consumer = None 
+                else:
+                    logger.info(f"[{self.group_id}] OrderModuleKafkaConsumer was already None (was running: {current_running_status}).")
+                
+                span.set_status(Status(StatusCode.OK))
+            except Exception as e:
+                logger.error(f"[{self.group_id}] Error stopping OrderModuleKafkaConsumer: {e}", exc_info=True)
+                if span.is_recording():
+                    span.record_exception(e)
+                    span.set_status(Status(StatusCode.ERROR, f"KafkaConsumerStopFailed: {str(e)}"))
