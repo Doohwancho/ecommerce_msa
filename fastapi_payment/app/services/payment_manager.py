@@ -217,10 +217,11 @@ class PaymentManager:
                 async with WriteSessionLocal() as session:
                     async with session.begin():
                         compensation_event_data = {
-                            'type': "payment_processing_failed_compensation",
+                            'type': "payment_failed",
                             'order_id': str(order_id),
                             'items_to_revert_stock': original_event_payload.get('items', []),
                             'reason': reason_type,
+                            'payment_attempt_details': original_event_payload.get('payment_details_if_any', {}), # 필요시 결제 시도 정보 추가
                             'original_event_preview': json.dumps(original_event_payload, ensure_ascii=False)[:128],
                             'timestamp': datetime.datetime.utcnow().isoformat()
                         }
@@ -240,9 +241,9 @@ class PaymentManager:
 
                         outbox_entry = Outbox(
                             id=str(uuid.uuid4()),
-                            aggregatetype="payment_compensation", 
+                            aggregatetype="payment", 
                             aggregateid=str(order_id),
-                            type="payment_compensation_event", 
+                            type="payment_failed", 
                             payload=compensation_event_data,
                             traceparent_for_header=carrier.get('traceparent'),
                             tracestate_for_header=carrier.get('tracestate')

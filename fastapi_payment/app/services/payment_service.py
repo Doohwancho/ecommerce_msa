@@ -115,12 +115,12 @@ class PaymentService:
 
             try:
                 # SAGA 테스트용 실패 시뮬레이션
-                # if payment_data.stock_reserved == 10: # payment_data에 stock_reserved가 있다고 가정
-                #     sim_error_msg = "Simulated payment failure for SAGA (stock_reserved = 10)"
-                #     logger.warning(sim_error_msg)
-                #     span.set_attribute("app.payment.simulated_failure", True)
-                #     span.set_attribute("app.payment.simulated_failure_reason", sim_error_msg)
-                #     raise Exception(sim_error_msg) # 이 예외는 아래에서 잡힘
+                if round(payment_data.amount) == 35000: # order 상품이 3500원 * 10 = 35000원인 경우, 일부러 SAGA 패턴 실패 시키기
+                    sim_error_msg = "Simulated payment failure for SAGA (order_amount = 20)"
+                    logger.warning(sim_error_msg)
+                    span.set_attribute("app.payment.simulated_failure", True)
+                    span.set_attribute("app.payment.simulated_failure_reason", sim_error_msg)
+                    raise Exception(sim_error_msg) # 이 예외는 아래에서 잡힘
 
                 db_session = await self._get_write_db()
                 async with db_session.begin(): # 트랜잭션 시작 (SQLAlchemyInstrumentor가 감지 가능)
