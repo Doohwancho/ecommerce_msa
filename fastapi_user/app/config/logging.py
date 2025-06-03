@@ -2,6 +2,11 @@ import logging
 import sys
 import json
 from datetime import datetime
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.logging import LoggingInstrumentor
 from logging.config import dictConfig
 import socket
 
@@ -37,8 +42,21 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(log_data, cls=CustomJSONEncoder)
 
 def setup_logging():
-    # The OpenTelemetry TracerProvider and LoggingInstrumentor setup 
-    # has been moved to app.config.otel.setup_telemetry()
+    # OpenTelemetry Tracer 설정
+    tracer_provider = TracerProvider()
+    otlp_exporter = OTLPSpanExporter(
+        endpoint="otel-collector:4317",  # OpenTelemetry Collector 주소
+        insecure=True
+    )
+    span_processor = BatchSpanProcessor(otlp_exporter)
+    tracer_provider.add_span_processor(span_processor)
+    trace.set_tracer_provider(tracer_provider)
+
+    # LoggingInstrumentor 설정
+    LoggingInstrumentor().instrument(
+        tracer_provider=tracer_provider,
+        log_level=logging.INFO # Configure to capture INFO level logs via instrumentation
+    )
 
     # 로깅 설정 적용 (dictConfig 사용)
     log_config = {

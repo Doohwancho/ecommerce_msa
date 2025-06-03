@@ -6,7 +6,7 @@ import logging
 from typing import Callable, Dict, List # List 추가
 
 from opentelemetry import trace
-from opentelemetry import propagate # Corrected import for propagate module
+from opentelemetry import propagate # opentelemetry.propagate 모듈을 가져옴
 from opentelemetry.trace import Status, StatusCode # SpanKind는 자동 계측 시 직접 사용 줄임
 from opentelemetry.semconv.trace import SpanAttributes # 필요시 표준 속성 사용
 
