@@ -10,6 +10,7 @@ import asyncio
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from opentelemetry.semconv.trace import SpanAttributes # 시맨틱 컨벤션 사용
+from circuitbreaker import circuit, CircuitBreakerError
 
 # 로깅 설정 (애플리케이션 진입점에서 한 번만 설정 권장)
 # logging.basicConfig(level=logging.INFO) # 이미 설정되었다고 가정
@@ -54,6 +55,12 @@ class UserClient:
         self.channel: Optional[grpc.aio.Channel] = None # 타입 힌트 명확화
         self.stub: Optional[user_pb2_grpc.UserServiceStub] = None # 타입 힌트 명확화
         self.default_timeout = 5  # 기본 timeout 5초
+        # Circuit breaker 설정
+        self.circuit_breaker = circuit(
+            failure_threshold=5,  # 5번 실패하면 circuit open
+            recovery_timeout=30,  # 30초 후 half-open 상태로 전환
+            expected_exception=(RpcError, ConnectionError, asyncio.TimeoutError)  # 이 예외들이 발생하면 실패로 간주
+        )
         # self.tracer = trace.get_tracer(__name__) # 모듈 수준 트레이서 사용
 
     async def _ensure_channel(self):
@@ -89,11 +96,15 @@ class UserClient:
                     self.stub = None
                     raise # 호출부에서 채널 문제를 인지하도록 함
 
+    @circuit( # self.circuit_breaker 인스턴스를 직접 사용하거나, 데코레이터에 바로 설정
+        failure_threshold=5, recovery_timeout=30,
+        expected_exception=(RpcError, ConnectionError, asyncio.TimeoutError, CircuitBreakerError) # CircuitBreakerError 추가
+    )
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=5), # 재시도 간격 조정
-        retry=retry_if_exception_type((RpcError, ConnectionError, asyncio.TimeoutError)), # TimeoutError도 재시도
-        before_sleep=log_user_client_retry_attempt, # 재시도 전 콜백
+        wait=wait_exponential(multiplier=1, min=1, max=5),
+        retry=retry_if_exception_type((RpcError, ConnectionError, asyncio.TimeoutError)),
+        before_sleep=log_user_client_retry_attempt,
         reraise=True
     )
     async def get_user(self, user_id: str) -> user_pb2.UserResponse: # 반환 타입 명시
@@ -135,6 +146,10 @@ class UserClient:
                     raise HTTPException(status_code=404, detail="User not found by service logic")
 
             # asyncio.TimeoutError는 tenacity @retry에서 처리됨
+            except CircuitBreakerError as cbe: # 서킷 브레이커 열렸을 때!
+                logger.error(f"Circuit open for UserClient.get_user(id={user_id}): {cbe}", exc_info=True)
+                if span.is_recording(): span.record_exception(cbe); span.set_status(Status(StatusCode.ERROR, "CircuitBreakerOpen"))
+                raise HTTPException(status_code=503, detail=f"User service is temporarily unavailable (circuit open): {cbe}")
             except grpc.RpcError as e:
                 logger.error(f"gRPC RpcError in get_user for user_id {user_id}: {e.code()} - {e.details()}", exc_info=True)
                 span.record_exception(e)
@@ -149,6 +164,10 @@ class UserClient:
                      raise HTTPException(status_code=504, detail="User service request timed out (gRPC DEADLINE_EXCEEDED)")
                 else:
                     raise HTTPException(status_code=500, detail=f"gRPC call to user service failed: {e.details()}")
+            except asyncio.TimeoutError as te: # tenacity 재시도 후에도 최종 타임아웃
+                logger.error(f"TimeoutError in UserClient.get_user for {user_id} after retries: {te}", exc_info=True)
+                if span.is_recording(): span.record_exception(te); span.set_status(Status(StatusCode.ERROR, "TimeoutAfterRetries"))
+                raise HTTPException(status_code=504, detail="User service request timed out after retries")
             except Exception as e:
                 logger.error(f"Unexpected error in get_user for user_id {user_id}: {e}", exc_info=True)
                 span.record_exception(e)

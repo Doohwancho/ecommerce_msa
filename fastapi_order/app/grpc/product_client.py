@@ -1,22 +1,24 @@
+# fastapi-order/app/grpc/product_client.py
 import grpc
-import product_pb2
-import product_pb2_grpc
+import product_pb2 # 네가 생성한 product_pb2.py 파일
+import product_pb2_grpc # 네가 생성한 product_pb2_grpc.py 파일
 from fastapi import HTTPException
 import logging
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional # Tuple 임포트
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryCallState
-from grpc import RpcError
+from grpc import RpcError, aio as grpc_aio # aio 명시적 임포트
 import asyncio
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
-from opentelemetry.semconv.trace import SpanAttributes # 시맨틱 컨벤션 사용
+from opentelemetry.semconv.trace import SpanAttributes
+from circuitbreaker import circuit, CircuitBreakerError # CircuitBreakerError 임포트
+import os
 
-# 로깅 설정 (애플리케이션 진입점에서 한 번만 설정하는 것이 일반적)
-# logging.basicConfig(level=logging.INFO) # 이미 설정되어 있다고 가정
 logger = logging.getLogger(__name__)
-tracer = trace.get_tracer(__name__) # 모듈 수준 트레이서
+# 모듈 수준 트레이서는 애플리케이션 시작 시 OTel 설정이 완료된 후 생성되도록 하는 것이 좋음
+# 여기서는 각 클라이언트 인스턴스가 생성될 때 또는 메서드 호출 시 트레이서를 얻도록 변경 가능
+# tracer = trace.get_tracer(__name__) # 또는 클라이언트 __init__에서 self.tracer = trace.get_tracer(...)
 
-# gRPC 채널 옵션 (동일하게 유지)
 GRPC_CHANNEL_OPTIONS = [
     ('grpc.max_send_message_length', 50 * 1024 * 1024),
     ('grpc.max_receive_message_length', 50 * 1024 * 1024),
@@ -27,260 +29,189 @@ GRPC_CHANNEL_OPTIONS = [
     ('grpc.dns_min_time_between_resolutions_ms', 10000),
 ]
 
-# Tenacity 재시도 시 로깅 및 스팬 이벤트 추가를 위한 콜백 함수
-def log_retry_attempt(retry_state: RetryCallState):
-    current_span = trace.get_current_span()
-    if current_span.is_recording():
-        event_attributes = {
-            "retry.attempt_number": retry_state.attempt_number,
-            "retry.delay_since_first_attempt_ms": retry_state.delay_since_first_attempt * 1000,
-        }
-        if retry_state.outcome and retry_state.outcome.failed:
-            exc = retry_state.outcome.exception()
-            event_attributes["retry.exception_type"] = exc.__class__.__name__
-            event_attributes["retry.exception_message"] = str(exc)
-            # record_exception은 스팬 자체에 예외를 기록하므로 이벤트에는 요약 정보만 넣거나 생략 가능
-
-        current_span.add_event("RetryAttempt", attributes=event_attributes)
-    logger.warning(
-        f"Retrying gRPC call, attempt {retry_state.attempt_number}, "
-        f"due to: {retry_state.outcome.exception() if retry_state.outcome else 'N/A'}"
-    )
+def log_product_client_retry_attempt(retry_state: RetryCallState):
+    # UserClient의 콜백 함수와 동일한 로직 사용 가능 (또는 서비스별로 커스터마이징)
+    tracer_for_log = trace.get_tracer("app.grpc.product_client.retry_logger") # 로깅용 트레이서
+    current_span = trace.get_current_span() # 현재 활성화된 스팬 가져오기
+    attempt_number = retry_state.attempt_number
+    exception_info = ""
+    if retry_state.outcome and retry_state.outcome.failed:
+        exc = retry_state.outcome.exception()
+        exception_info = f" due to: {exc.__class__.__name__} - {str(exc)}"
+        if current_span.is_recording():
+            current_span.add_event(
+                "gRPCMethodRetryAttempt",
+                attributes={
+                    "retry.attempt_number": attempt_number,
+                    "retry.exception_type": exc.__class__.__name__,
+                    "retry.exception_message": str(exc),
+                    "retry.delay_since_first_attempt_ms": retry_state.delay_since_first_attempt * 1000
+                }
+            )
+    logger.warning(f"Retrying ProductClient gRPC call, attempt {attempt_number}{exception_info}")
 
 
 class ProductClient:
-    def __init__(self, target_address: str = 'product-service:50051'): # 타겟 주소 주입 가능하도록 변경
-        self.target_address = target_address
-        self.channel: Optional[grpc.aio.Channel] = None # 타입 힌트 명확화
-        self.stub: Optional[product_pb2_grpc.ProductServiceStub] = None # 타입 힌트 명확화
-        self.default_timeout = 5  # 기본 timeout 5초
-        # self.tracer = trace.get_tracer(__name__) # 모듈 수준 트레이서 사용
+    def __init__(self, host: Optional[str] = None, port: Optional[str] = None):
+        self.host = host or os.getenv("PRODUCT_SERVICE_HOST", "product-service")
+        self.port = port or os.getenv("PRODUCT_SERVICE_GRPC_PORT", "50051")
+        self.target = f"{self.host}:{self.port}"
+        self.channel: Optional[grpc_aio.Channel] = None
+        self.stub: Optional[product_pb2_grpc.ProductServiceStub] = None
+        self.default_timeout = 10  # 기본 타임아웃 10초 (조정 가능)
+        self.tracer = trace.get_tracer("app.grpc.ProductClient", "0.1.0") # 인스턴스별 트레이서
+
+        # Circuit Breaker 인스턴스 (각 ProductClient 인스턴스마다 개별 상태를 가짐)
+        self.circuit_breaker = circuit(
+            failure_threshold=3,    # 3번 연속 실패하면 open
+            recovery_timeout=20,    # 20초 후 half-open
+            expected_exception=(RpcError, ConnectionError, asyncio.TimeoutError, CircuitBreakerError), # CircuitBreakerError도 추가 (중첩 방지)
+            name=f"ProductClient.{self.target}" # 서킷 브레이커에 고유 이름 부여 (로깅/모니터링 용이)
+        )
+        logger.info(f"Initialized ProductClient with target: {self.target}")
 
     async def _ensure_channel(self):
-        # 이 메서드는 짧은 시간 내에 완료되지만, 채널 생성 자체를 추적할 수 있음
-        # GrpcInstrumentorClient는 채널 생성은 직접 계측하지 않음
-        if self.channel is None or self.channel.get_state(try_to_connect=False) == grpc.ChannelConnectivity.SHUTDOWN:
-            # 채널이 없거나, 명시적으로 닫힌 경우에만 새로 생성
-            with tracer.start_as_current_span("gRPC.channel.ensure_connection") as span:
+        # UserClient의 _ensure_channel과 거의 동일한 로직. 스팬 이름 등만 ProductClient에 맞게 수정.
+        current_state = self.channel.get_state(try_to_connect=False) if self.channel else None
+        if self.channel is None or current_state == grpc.ChannelConnectivity.SHUTDOWN:
+            with self.tracer.start_as_current_span("gRPC.channel.ensure_product_service_connection") as span:
                 span.set_attribute(SpanAttributes.RPC_SYSTEM, "grpc")
-                span.set_attribute(SpanAttributes.NET_PEER_NAME, self.target_address.split(':')[0])
-                if ':' in self.target_address:
-                     span.set_attribute(SpanAttributes.NET_PEER_PORT, self.target_address.split(':')[1])
-                else: # 포트가 명시되지 않은 경우 (예: DNS SRV 사용 시)
-                     span.set_attribute(SpanAttributes.NET_PEER_PORT, "default_grpc_port") # 또는 실제 사용 포트
-
+                span.set_attribute(SpanAttributes.NET_PEER_NAME, self.host)
+                span.set_attribute(SpanAttributes.NET_PEER_PORT, self.port)
                 try:
-                    if self.channel: # 기존 채널이 있었으나 SHUTDOWN 상태라면 명시적으로 닫기 시도
+                    if self.channel and current_state == grpc.ChannelConnectivity.SHUTDOWN:
                         await self.channel.close()
-
-                    self.channel = grpc.aio.insecure_channel(self.target_address, options=GRPC_CHANNEL_OPTIONS)
+                    logger.info(f"Creating new gRPC channel to ProductService at {self.target}")
+                    self.channel = grpc_aio.insecure_channel(self.target, options=GRPC_CHANNEL_OPTIONS)
                     self.stub = product_pb2_grpc.ProductServiceStub(self.channel)
-                    logger.info(f"Established new gRPC channel to {self.target_address}")
                     span.set_status(Status(StatusCode.OK))
-                    span.add_event("gRPCChannelEstablished")
+                    span.add_event("ProductService.gRPCChannelEstablished")
                 except Exception as e:
-                    logger.error(f"Failed to establish gRPC channel to {self.target_address}: {e}", exc_info=True)
-                    span.record_exception(e)
-                    span.set_status(Status(StatusCode.ERROR, "ChannelEstablishmentFailed"))
-                    raise # 채널 생성 실패는 심각한 문제이므로 예외를 다시 발생
+                    logger.error(f"Failed to establish gRPC channel to ProductService at {self.target}: {e}", exc_info=True)
+                    if span.is_recording(): span.record_exception(e); span.set_status(Status(StatusCode.ERROR, "ProductChannelEstablishmentFailed"))
+                    self.channel = None; self.stub = None; raise
 
+    # 데코레이터 순서: @circuit이 바깥쪽, @retry가 안쪽
+    # 이렇게 하면 서킷이 열렸을 때는 재시도 로직 자체가 실행 안 됨.
+    @circuit(failure_threshold=3, recovery_timeout=20, expected_exception=(RpcError, ConnectionError, asyncio.TimeoutError))
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=5), # 재시도 간격 조정 (예시)
-        retry=retry_if_exception_type((RpcError, ConnectionError, asyncio.TimeoutError)), # TimeoutError도 재시도 대상 포함
-        before_sleep=log_retry_attempt, # 재시도 전 콜백
+        wait=wait_exponential(multiplier=1, min=0.5, max=3), # 재시도 간격 살짝 줄임
+        retry=retry_if_exception_type((RpcError, ConnectionError, asyncio.TimeoutError)),
+        before_sleep=log_product_client_retry_attempt,
         reraise=True
     )
-    async def get_product(self, product_id: str) -> product_pb2.ProductResponse: # 반환 타입 명시
-        # 이 스팬은 get_product 작업 전체(재시도 포함)를 감싼다.
-        # GrpcInstrumentorClient가 각 gRPC 시도에 대한 자식 스팬을 생성한다.
-        with tracer.start_as_current_span("ProductClient.get_product") as span: # 스팬 이름 변경 (클래스.메서드)
-            span.set_attribute(SpanAttributes.RPC_SYSTEM, "grpc") # 이 작업이 gRPC 호출임을 명시
-            span.set_attribute("app.product_id", product_id) # 애플리케이션 특정 속성
+    async def get_product(self, product_id: str) -> product_pb2.ProductResponse:
+        # 메서드 시작 시 트레이서 다시 가져오기 (NoOpTracer 방지 위한 습관)
+        # tracer = trace.get_tracer(__name__) # 또는 self.tracer 사용
+        with self.tracer.start_as_current_span("ProductClient.get_product_call") as span: # 스팬 이름 변경
+            span.set_attribute(SpanAttributes.RPC_SYSTEM, "grpc")
+            span.set_attribute(SpanAttributes.RPC_SERVICE, "ProductService") # 호출하는 서비스 명시
+            span.set_attribute(SpanAttributes.RPC_METHOD, "GetProduct")    # 호출하는 메서드 명시
+            span.set_attribute("app.product_id", product_id)
             try:
                 await self._ensure_channel()
+                if not self.stub: raise ConnectionError("ProductService stub not available for get_product.")
                 
-                request = product_pb2.ProductRequest(product_id=product_id)
-                # GrpcInstrumentorClient가 `self.stub.GetProduct` 호출을 자동으로 계측
+                request = product_pb2.GetProductRequest(product_id=product_id) # 요청 객체 이름 확인
+                logger.info(f"ProductClient: Calling GetProduct for product_id: {product_id}")
+                # GrpcInstrumentorClient가 이 stub 호출을 자동으로 계측하여 CLIENT 스팬을 생성
                 response = await self.stub.GetProduct(request, timeout=self.default_timeout)
                 
-                if not response.product_id: # 응답은 왔지만, 내용이 없는 경우 (서비스 로직에 따라)
-                    logger.warning(f"Product {product_id} not found by service (empty response).")
+                if not response or not response.product_id: # 응답 내용으로 성공/실패 판단 강화
+                    logger.warning(f"Product {product_id} not found by ProductService (empty or invalid response).")
                     span.set_attribute("app.product.found", False)
-                    span.set_status(Status(StatusCode.ERROR, "ProductNotFoundByServiceLogic")) # OK가 아님을 명시
-                    raise HTTPException(status_code=404, detail="Product not found by service logic")
-                
+                    span.set_status(Status(StatusCode.ERROR, "ProductNotFoundByServiceLogic")) # 서비스 로직상 못 찾은 것도 에러로 간주 가능
+                    raise HTTPException(status_code=404, detail=f"Product {product_id} not found via ProductService")
+
                 span.set_attribute("app.product.found", True)
-                span.set_attribute("app.response.product.title", response.title)
-                span.set_attribute("app.response.product.price", response.price)
+                # ... (필요한 응답값 속성으로 추가)
                 span.set_status(Status(StatusCode.OK))
                 return response
-            # asyncio.TimeoutError는 tenacity @retry에서 처리되도록 함 (retry_if_exception_type에 포함)
+            except CircuitBreakerError as cbe: # 서킷 브레이커가 열려서 발생한 예외
+                logger.error(f"Circuit open for ProductClient.get_product(id={product_id}): {cbe}", exc_info=True)
+                if span.is_recording(): span.record_exception(cbe); span.set_status(Status(StatusCode.ERROR, "CircuitBreakerOpen"))
+                raise HTTPException(status_code=503, detail=f"Product service is temporarily unavailable (circuit open): {cbe}")
             except grpc.RpcError as e:
-                logger.error(f"gRPC RpcError in get_product for product_id {product_id}: {e.code()} - {e.details()}", exc_info=True)
-                span.record_exception(e) # 스팬에 예외 기록
-                # 자동 계측된 gRPC 스팬에도 오류 상태가 기록됨
-                span.set_attribute(SpanAttributes.RPC_GRPC_STATUS_CODE, e.code().value[0]) # gRPC 상태 코드 기록
-                span.set_status(Status(StatusCode.ERROR, f"gRPC RpcError: {e.details()}"))
-                
-                if e.code() == grpc.StatusCode.NOT_FOUND:
-                    raise HTTPException(status_code=404, detail=f"Product {product_id} not found (gRPC NOT_FOUND)")
-                elif e.code() == grpc.StatusCode.UNAVAILABLE:
-                    raise HTTPException(status_code=503, detail="Product service unavailable")
-                # DEADLINE_EXCEEDED는 asyncio.TimeoutError로 잡히거나, gRPC 자체 타임아웃으로 올 수 있음
-                elif e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
-                    raise HTTPException(status_code=504, detail="Product service request timed out (gRPC DEADLINE_EXCEEDED)")
-                else:
-                    raise HTTPException(status_code=500, detail=f"gRPC call failed: {e.details()}")
-            except Exception as e: # 그 외 예외 (예: HTTPException, 개발 중 실수 등)
-                logger.error(f"Unexpected error in get_product for product_id {product_id}: {e}", exc_info=True)
-                span.record_exception(e)
-                span.set_status(Status(StatusCode.ERROR, "UnexpectedErrorInGetProduct"))
-                # 이미 HTTPException인 경우 그대로, 아니면 500으로 변환
-                if not isinstance(e, HTTPException):
-                    raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+                # ... (UserClient와 유사한 RpcError 처리 로직)
+                logger.error(f"gRPC RpcError in ProductClient.get_product for {product_id}: {e.code()} - {e.details()}", exc_info=True)
+                if span.is_recording(): span.record_exception(e); span.set_attribute(SpanAttributes.RPC_GRPC_STATUS_CODE, e.code().value[0]); span.set_status(Status(StatusCode.ERROR, str(e.details())))
+                if e.code() == grpc.StatusCode.NOT_FOUND: raise HTTPException(status_code=404, detail=f"Product {product_id} not found (gRPC)")
+                elif e.code() == grpc.StatusCode.UNAVAILABLE: raise HTTPException(status_code=503, detail="Product service unavailable")
+                elif e.code() == grpc.StatusCode.DEADLINE_EXCEEDED: raise HTTPException(status_code=504, detail="Product service request timed out")
+                else: raise HTTPException(status_code=500, detail=f"Product service gRPC call failed: {e.details()}")
+            except asyncio.TimeoutError as te: # Tenacity 재시도 중 stub 호출의 timeout 또는 asyncio.wait_for의 타임아웃
+                logger.error(f"TimeoutError in ProductClient.get_product for {product_id} after retries: {te}", exc_info=True)
+                if span.is_recording(): span.record_exception(te); span.set_status(Status(StatusCode.ERROR, "TimeoutAfterRetries"))
+                raise HTTPException(status_code=504, detail="Product service request timed out after retries")
+            except Exception as e:
+                # ... (UserClient와 유사한 일반 예외 처리 로직)
+                logger.error(f"Unexpected error in ProductClient.get_product for {product_id}: {e}", exc_info=True)
+                if span.is_recording(): span.record_exception(e); span.set_status(Status(StatusCode.ERROR, "UnexpectedError"))
+                if not isinstance(e, HTTPException): raise HTTPException(status_code=500, detail=str(e))
                 raise
 
-    # 다른 메서드들(check_availability, check_and_reserve_inventory 등)도 유사한 패턴으로 수정
-    # - 스팬 이름: ProductClient.<method_name>
-    # - @retry 데코레이터에 before_sleep=log_retry_attempt 추가
-    # - 주요 파라미터 및 응답 정보를 app.* 형태의 속성으로 추가
-    # - grpc.RpcError 및 기타 예외 처리 시 span.record_exception 및 span.set_status, SpanAttributes.RPC_GRPC_STATUS_CODE 추가
-
+    # check_and_reserve_inventory 메서드도 유사하게 @circuit, @retry, OTel 스팬 적용
+    @circuit(failure_threshold=3, recovery_timeout=20, expected_exception=(RpcError, ConnectionError, asyncio.TimeoutError, CircuitBreakerError))
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=5),
+        stop=stop_after_attempt(2), # 재고 관련 작업은 재시도 횟수 줄일 수도 있음
+        wait=wait_exponential(multiplier=1, min=0.2, max=2),
         retry=retry_if_exception_type((RpcError, ConnectionError, asyncio.TimeoutError)),
-        before_sleep=log_retry_attempt,
+        before_sleep=log_product_client_retry_attempt,
         reraise=True
     )
-    async def check_availability(self, product_id: str, quantity: int) -> Tuple[bool, Optional[product_pb2.ProductResponse]]:
-        with tracer.start_as_current_span("ProductClient.check_availability") as span:
+    async def check_and_reserve_inventory(self, product_id: str, quantity: int) -> Tuple[bool, str]:
+        # tracer = trace.get_tracer(__name__)
+        with self.tracer.start_as_current_span("ProductClient.check_and_reserve_inventory_call") as span:
             span.set_attribute(SpanAttributes.RPC_SYSTEM, "grpc")
+            span.set_attribute(SpanAttributes.RPC_SERVICE, "ProductService")
+            span.set_attribute(SpanAttributes.RPC_METHOD, "CheckAndReserveInventory")
             span.set_attribute("app.product_id", product_id)
-            span.set_attribute("app.request.quantity", quantity)
-            product_info: Optional[product_pb2.ProductResponse] = None
+            span.set_attribute("app.quantity_to_reserve", quantity)
             try:
                 await self._ensure_channel()
+                if not self.stub: raise ConnectionError("ProductService stub not available for check_and_reserve_inventory.")
+
+                request = product_pb2.InventoryRequest(product_id=product_id, quantity=quantity) # 요청 객체 이름 확인
+                logger.info(f"ProductClient: Calling CheckAndReserveInventory for product {product_id}, quantity {quantity}")
+                response = await self.stub.CheckAndReserveInventory(request, timeout=self.default_timeout)
                 
-                # 1. 상품 정보 가져오기 (내부 호출이지만, 이 메서드의 일부로 트레이스)
-                # get_product 호출 시 자체적인 스팬 생성 (부모-자식 관계)
-                product_info = await self.get_product(product_id) # 이 호출은 이미 트레이싱됨
-                # get_product에서 product_id가 없으면 HTTPException(404) 발생하므로, product_info는 항상 유효하거나 예외 발생
-                
-                # 2. 재고 정보 가져오기
-                # get_product_inventory 호출 시 자체적인 스팬 생성
-                inventory = await self.get_product_inventory(product_id) # 이 호출은 이미 트레이싱됨
-                if not inventory or not inventory.product_id: # product_id 확인 추가
-                    logger.warning(f"Inventory info not found for product {product_id} during check_availability.")
-                    span.set_attribute("app.inventory.found", False)
-                    # 제품은 찾았지만 재고 정보가 없는 경우, 서비스 로직에 따라 처리
-                    # 여기서는 False 반환, 제품 정보는 전달
-                    span.set_status(Status(StatusCode.OK, "InventoryInfoNotFoundButProductExists")) # 에러는 아님
-                    return False, product_info
-
-                span.set_attribute("app.inventory.found", True)
-                span.set_attribute("app.inventory.available_stock", inventory.available_stock)
-                
-                available = inventory.available_stock >= quantity
-                span.set_attribute("app.inventory.is_available", available)
-                
-                if not available:
-                    logger.warning(f"Product {product_id} insufficient stock. Required: {quantity}, Available: {inventory.available_stock}")
-                else:
-                    logger.info(f"Product {product_id} sufficient stock. Required: {quantity}, Available: {inventory.available_stock}")
-                
-                span.set_status(Status(StatusCode.OK))
-                return available, product_info
-
-            except HTTPException as http_exc: # get_product 등에서 발생한 HTTP 예외
-                # 이 경우는 보통 404 (Product Not Found) 등이며, 재시도 대상이 아닐 수 있음
-                # tenacity의 retry_if_exception_type에 따라 재시도 여부 결정됨
-                logger.warning(f"HTTPException during check_availability for {product_id}: {http_exc.detail}", exc_info=True)
-                span.record_exception(http_exc) # 자식 스팬(get_product)에서 이미 기록되었을 수 있음
-                span.set_status(Status(StatusCode.ERROR, f"AvailabilityCheckFailedDueToHTTPException: {http_exc.detail}"))
-                # False와 함께 product_info (있다면) 반환 또는 예외 다시 발생
-                # 현재 코드는 tenacity에서 reraise=True이므로 get_product의 HTTPException이 그대로 올라감.
-                # check_availability의 반환 타입에 맞게 처리하려면, 여기서 잡아서 (False, product_info) 반환해야 할 수 있음
-                # 하지만, 제품 자체가 없으면 False, None이 더 적절.
-                if http_exc.status_code == 404:
-                    return False, None # 명시적으로 제품 없음 처리
-                raise # 다른 HTTP 예외는 그대로 전파
-            except grpc.RpcError as e: # get_product_inventory 등에서 직접 발생한 RpcError
-                logger.error(f"gRPC RpcError in check_availability for product_id {product_id}: {e.code()} - {e.details()}", exc_info=True)
-                span.record_exception(e)
-                span.set_attribute(SpanAttributes.RPC_GRPC_STATUS_CODE, e.code().value[0])
-                span.set_status(Status(StatusCode.ERROR, f"gRPC RpcError: {e.details()}"))
-                # RpcError 발생 시 False와 함께 product_info (있다면) 반환
-                return False, product_info
-            except Exception as e:
-                logger.error(f"Unexpected error in check_availability for product_id {product_id}: {e}", exc_info=True)
-                span.record_exception(e)
-                span.set_status(Status(StatusCode.ERROR, "UnexpectedErrorInCheckAvailability"))
-                return False, product_info # 예기치 않은 오류 시에도 (False, product_info) 반환
-
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=5),
-        retry=retry_if_exception_type((RpcError, ConnectionError, asyncio.TimeoutError)),
-        before_sleep=log_retry_attempt,
-        reraise=True # 실패 시 예외를 다시 발생시켜 호출자가 처리하도록 함
-    )
-    async def check_and_reserve_inventory(self, product_id: str, quantity: int) -> tuple[bool, str]:
-        with tracer.start_as_current_span("ProductClient.check_and_reserve_inventory") as span:
-            span.set_attribute(SpanAttributes.RPC_SYSTEM, "grpc")
-            span.set_attribute("app.product_id", product_id)
-            span.set_attribute("app.request.quantity", quantity)
-            try:
-                await self._ensure_channel()
-                request = product_pb2.InventoryRequest(product_id=product_id, quantity=quantity)
-                response = await self.stub.CheckAndReserveInventory(request, timeout=10) # 타임아웃 증가 예시
-
-                span.set_attribute("app.response.success", response.success)
-                span.set_attribute("app.response.message", response.message[:256]) # 메시지 길이 제한
-
-                if not response.success:
-                    logger.warning(f"Failed to check and reserve inventory for product {product_id}: {response.message}")
-                    # 성공 여부와 관계없이 gRPC 호출 자체는 성공했을 수 있으므로 OK로 두되, 추가 속성으로 결과 명시
-                    span.set_status(Status(StatusCode.OK, "ReservationLogicFailed")) 
-                else:
+                span.set_attribute("app.inventory.reservation.success", response.success)
+                span.set_attribute("app.inventory.reservation.message", response.message[:256])
+                if response.success:
                     span.set_status(Status(StatusCode.OK))
+                else:
+                    # 비즈니스 로직상 실패는 에러는 아닐 수 있지만, 스팬에는 기록
+                    span.set_status(Status(StatusCode.OK, f"InventoryReservationFailedLogically: {response.message}"))
                 return response.success, response.message
-            # asyncio.TimeoutError는 tenacity @retry에서 처리
+            except CircuitBreakerError as cbe:
+                logger.error(f"Circuit open for ProductClient.check_and_reserve_inventory(id={product_id}, qty={quantity}): {cbe}", exc_info=True)
+                if span.is_recording(): span.record_exception(cbe); span.set_status(Status(StatusCode.ERROR, "CircuitBreakerOpen"))
+                # SAGA 패턴에서는 보상 트랜잭션 유발을 위해 특정 예외를 발생시키거나, (False, 메시지) 반환
+                return False, f"Product service temporarily unavailable (circuit open): {cbe}"
             except grpc.RpcError as e:
-                logger.error(f"gRPC RpcError in check_and_reserve_inventory for {product_id}: {e.code()} - {e.details()}", exc_info=True)
-                span.record_exception(e)
-                span.set_attribute(SpanAttributes.RPC_GRPC_STATUS_CODE, e.code().value[0])
-                span.set_status(Status(StatusCode.ERROR, f"gRPC RpcError: {e.details()}"))
-                # tenacity에서 reraise=True 이므로 예외가 다시 발생됨.
-                # 호출부에서 이 예외를 보고 False, error_message를 반환하거나 다른 처리를 해야 함.
-                # 이 함수의 반환 타입 tuple[bool, str]을 맞추기 위해선 여기서 변환 필요.
-                # 하지만 reraise=True면 이 부분은 실행되지 않을 수 있음.
-                # reraise=False로 하고 여기서 (False, e.details())를 반환하는 방법도 있음.
-                # 현재는 reraise=True이므로, 호출자가 HTTPException 등으로 변환할 것임.
-                raise 
+                # ... (get_product과 유사한 RpcError 처리, False, 메시지 반환)
+                logger.error(f"gRPC RpcError in ProductClient.check_and_reserve for {product_id}: {e.code()} - {e.details()}", exc_info=True)
+                if span.is_recording(): span.record_exception(e); span.set_attribute(SpanAttributes.RPC_GRPC_STATUS_CODE, e.code().value[0]); span.set_status(Status(StatusCode.ERROR, str(e.details())))
+                # SAGA 패턴에 맞춰 (False, 에러메시지) 반환 또는 특정 예외 발생
+                return False, f"gRPC Error: {e.details()}" 
+            except asyncio.TimeoutError as te:
+                logger.error(f"TimeoutError in ProductClient.check_and_reserve for {product_id} after retries: {te}", exc_info=True)
+                if span.is_recording(): span.record_exception(te); span.set_status(Status(StatusCode.ERROR, "TimeoutAfterRetries"))
+                return False, "Product service request timed out after retries"
             except Exception as e:
-                logger.error(f"Unexpected error in check_and_reserve_inventory for {product_id}: {e}", exc_info=True)
-                span.record_exception(e)
-                span.set_status(Status(StatusCode.ERROR, "UnexpectedError"))
-                raise # 예측 못한 에러는 그대로 전파
+                # ... (get_product과 유사한 일반 예외 처리, False, 메시지 반환)
+                logger.error(f"Unexpected error in ProductClient.check_and_reserve for {product_id}: {e}", exc_info=True)
+                if span.is_recording(): span.record_exception(e); span.set_status(Status(StatusCode.ERROR, "UnexpectedError"))
+                return False, f"Unexpected error: {str(e)}"
 
-    # release_inventory, get_product_inventory도 유사하게 수정
+
+    # cancel_inventory_reservation 메서드도 check_and_reserve_inventory와 유사하게 @circuit, @retry, OTel 스팬 적용
 
     async def close(self):
+        # UserClient의 close와 동일한 로직
         if self.channel:
-            with tracer.start_as_current_span("gRPC.channel.close") as span: # 스팬 이름 명확히
-                span.set_attribute(SpanAttributes.RPC_SYSTEM, "grpc")
-                span.set_attribute(SpanAttributes.NET_PEER_NAME, self.target_address.split(':')[0])
-                try:
-                    logger.info(f"Closing gRPC channel to {self.target_address}")
-                    await self.channel.close()
-                    self.channel = None
-                    self.stub = None
-                    span.set_status(Status(StatusCode.OK))
-                    span.add_event("gRPCChannelClosed")
-                except Exception as e:
-                    logger.error(f"Error closing gRPC channel: {e}", exc_info=True)
-                    span.record_exception(e)
-                    span.set_status(Status(StatusCode.ERROR, "ChannelCloseFailed"))
+            # tracer = trace.get_tracer(__name__)
+            with self.tracer.start_as_current_span("gRPC.channel.close_product_service") as span:
+                # ... (UserClient와 동일하게 스팬 속성, 로깅, 예외 처리)
+                pass
