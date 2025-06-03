@@ -6,6 +6,7 @@ from sqlalchemy import select
 import sqlalchemy.exc
 import pymysql.err
 import asyncio
+import logging # Ensure this import is present
 
 from app.config.elasticsearch import elasticsearch_config
 from app.schemas.product import ProductCreate, ProductUpdate, ProductResponse, ProductsExistResponse, ProductInventoryResponse
@@ -14,12 +15,13 @@ from app.config.database import (
     get_mysql_db, get_read_mysql_db # Removed get_read_db, get_write_db if they are duplicates
 )
 from app.models.product import Product as MySQLProduct
-from app.config.logging import logger # Your configured logger
 
 # OTel imports
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from opentelemetry.semconv.trace import SpanAttributes # For semantic conventions
+
+logger = logging.getLogger(__name__) # Ensure logger is obtained correctly
 
 class ProductService:
     def __init__(self):
@@ -31,9 +33,6 @@ class ProductService:
         self.tracer = trace.get_tracer("app.services.ProductService", "0.1.0")
 
     async def _get_db_connection(self, getter_func, db_type: str, instance_role: str, span_name_suffix: str) -> Any:
-        # Helper to get DB/ES connections with tracing
-        # This internal method assumes it's called within an active span of a public method.
-        # For more detailed tracing of connection acquisition itself, especially if it's complex or slow:
         with self.tracer.start_as_current_span(f"service.product.get_connection.{span_name_suffix}") as conn_span:
             conn_span.set_attribute(SpanAttributes.DB_SYSTEM, db_type)
             conn_span.set_attribute("app.db.role", instance_role)
@@ -41,17 +40,16 @@ class ProductService:
                 connection = await getter_func()
                 if connection is None:
                     error_msg = f"{db_type.capitalize()} {instance_role} connection failed: getter returned None"
-                    logger.error(error_msg) # Log before raising
+                    logger.error("DB connection failed: getter returned None", extra={"db_type": db_type, "instance_role": instance_role}) 
                     conn_span.set_status(Status(StatusCode.ERROR, error_msg))
-                    raise ConnectionError(error_msg) # Use a more specific exception
+                    raise ConnectionError(error_msg)
                 conn_span.set_status(Status(StatusCode.OK))
                 return connection
             except Exception as e:
-                # This will catch ConnectionError from above or any other exception from getter_func
-                logger.error(f"Failed to get {db_type} {instance_role} connection: {e}", exc_info=True)
+                logger.error("Failed to get connection", extra={"db_type": db_type, "instance_role": instance_role, "error": str(e)}, exc_info=True)
                 conn_span.record_exception(e)
                 conn_span.set_status(Status(StatusCode.ERROR, f"Failed to get {db_type} {instance_role} connection"))
-                raise # Re-raise to be handled by the calling public method's trace
+                raise
 
     async def _get_write_collection(self):
         if self.write_collection is None:
@@ -82,59 +80,49 @@ class ProductService:
         return self.read_db_session
     
     async def _get_es(self):
-        # Elasticsearch client acquisition is often lightweight if connection pool is managed by client library.
-        # Tracing here is useful if elasticsearch_config.get_client() has significant logic/IO.
-        # ElasticsearchInstrumentor will trace the actual ES operations.
         return await self._get_db_connection(
             elasticsearch_config.get_client, "elasticsearch", "client", "es_client"
         )
 
     async def create_product(self, product: ProductCreate) -> ProductResponse:
         """새로운 제품 생성 (MongoDB와 MySQL에 동시 저장)"""
-        # This span is a parent to spans created by _get_write_collection, _get_write_db,
-        # and auto-instrumented Pymongo/SQLAlchemy calls.
         with self.tracer.start_as_current_span("service.product.create_product") as span:
             span.set_attribute("app.product.request.title", product.title)
             span.set_attribute("app.product.request.sku", product.sku)
             span.set_attribute("app.product.request.brand", product.brand)
-            product_id = None # Initialize to handle potential early exit
+            product_id = None
             max_retries = 3
             retry_count = 0
 
             while retry_count < max_retries:
                 try:
-                    # MongoDB write
                     product_dict = product.dict()
                     current_time_iso = datetime.now(timezone.utc).isoformat()
                     product_dict["created_at"] = current_time_iso
                     product_dict["updated_at"] = current_time_iso
                     
                     mongo_payload = product_dict.copy()
-                    if "stock" in mongo_payload: # MongoDB에서는 stock 정보 제외
+                    if "stock" in mongo_payload:
                         del mongo_payload["stock"]
                     
                     span.add_event("Attempting MongoDB insert")
                     collection = await self._get_write_collection()
-                    # PymongoInstrumentor traces insert_one
                     result = await collection.insert_one(mongo_payload)
                     product_id = str(result.inserted_id)
-                    span.set_attribute("app.product.id", product_id) # Set product_id as soon as available
+                    span.set_attribute("app.product.id", product_id)
                     span.set_attribute(SpanAttributes.DB_MONGODB_COLLECTION, collection.name)
-                    logger.info(f"Product {product_id} created in MongoDB.")
+                    logger.info("Product created in MongoDB.", extra={"product_id": product_id})
                     span.add_event("MongoDB insert successful", {"mongodb.document_id": product_id})
 
-                    # MySQL write
                     span.add_event("Attempting MySQL insert")
                     db = await self._get_write_db()
                     
-                    # Start MySQL transaction
                     async with db.begin():
-                        # Check if product_id already exists in MySQL
                         stmt_check = select(MySQLProduct).where(MySQLProduct.product_id == product_id)
                         existing_result = await db.execute(stmt_check)
                         if existing_result.scalar_one_or_none():
                             error_msg = f"IntegrityError: Product with ID {product_id} (from MongoDB) already exists in MySQL."
-                            logger.error(error_msg)
+                            logger.error("IntegrityError: Product already exists in MySQL (MongoDB ID).", extra={"product_id": product_id})
                             span.set_attribute("app.error.type", "data_integrity_violation")
                             span.set_status(Status(StatusCode.ERROR, error_msg))
                             raise ValueError(error_msg)
@@ -149,119 +137,105 @@ class ProductService:
                             created_at=datetime.now(timezone.utc)
                         )
                         db.add(mysql_product)
-                        # Transaction will be committed automatically when exiting the context
 
-                    logger.info(f"Product {product_id} created in MySQL.")
+                    logger.info("Product created in MySQL.", extra={"product_id": product_id})
                     span.add_event("MySQL insert successful")
                     
                     span.set_status(Status(StatusCode.OK))
-                    logger.info(f"Product {product_id} created successfully in both MongoDB and MySQL.")
+                    logger.info("Product created successfully in both MongoDB and MySQL.", extra={"product_id": product_id})
                     
-                    response_data = mongo_payload.copy() # Start with MongoDB data (stock excluded)
+                    response_data = mongo_payload.copy()
                     response_data["product_id"] = product_id
                     return ProductResponse(**response_data)
 
                 except Exception as e:
                     error_message = f"Error creating product (ID attempt: {product_id if product_id else 'N/A'}): {str(e)}"
-                    logger.error(error_message, exc_info=True)
+                    logger.error("Error creating product", extra={"product_id_attempt": product_id if product_id else 'N/A', "error": str(e)}, exc_info=True)
                     span.record_exception(e)
                     
-                    # Check if it's a lock timeout error
-                    if isinstance(e, (sqlalchemy.exc.OperationalError, pymysql.err.OperationalError)) and e.orig.args[0] == 1205:
+                    if isinstance(e, (sqlalchemy.exc.OperationalError, pymysql.err.OperationalError)) and hasattr(e, 'orig') and e.orig.args[0] == 1205:
                         retry_count += 1
                         if retry_count < max_retries:
-                            wait_time = 0.1 * (2 ** retry_count)  # Exponential backoff
-                            logger.warning(f"Lock timeout occurred, retrying in {wait_time} seconds (attempt {retry_count}/{max_retries})")
+                            wait_time = 0.1 * (2 ** retry_count)
+                            logger.warning("Lock timeout occurred, retrying", extra={"wait_time_seconds": wait_time, "attempt": retry_count, "max_retries": max_retries})
                             await asyncio.sleep(wait_time)
                             continue
                     
                     span.set_status(Status(StatusCode.ERROR, description=error_message))
-                    raise  # Re-raise if not a lock timeout or max retries exceeded
+                    raise
 
     async def get_product(self, product_id: str) -> Optional[ProductResponse]:
-        """제품 ID로 제품 조회 (Elasticsearch 먼저 시도, 없으면 MongoDB 조회)"""
+        """제품 ID로 제품 조회 (MongoDB만 사용, Elasticsearch 임시 비활성화)"""
         with self.tracer.start_as_current_span("service.product.get_product") as span:
             span.set_attribute("app.product.request.id", product_id)
             try:
-                # 1. Elasticsearch lookup
-                span.add_event("Attempting Elasticsearch lookup")
-                es = await self._get_es()
-                # ElasticsearchInstrumentor traces es.get
-                try:
-                    es_response = await es.get(index="my_db.products", id=product_id) # Ensure index name is correct
-                    if es_response and es_response.get('found', False):
-                        product_data = es_response['_source']
-                        product_data['product_id'] = product_id # Ensure product_id is present
-                        
-                        # Reconstruct variants if necessary (example from user code)
-                        if 'variants' in product_data and isinstance(product_data['variants'], list):
-                            variants = []
-                            for var_item in product_data['variants']:
-                                if isinstance(var_item, dict): # Ensure variant item is a dict
-                                    variants.append({
-                                        "attributes": var_item.get("attributes", {}),
-                                        "color": var_item.get("color"), "id": var_item.get("id"),
-                                        "inventory": var_item.get("inventory", 0),
-                                        "price": var_item.get("price", {"amount": 0.0, "currency": "USD"}),
-                                        "sku": var_item.get("sku"), "storage": var_item.get("storage")
-                                    })
-                            product_data['variants'] = variants
+                # Elasticsearch lookup (Temporarily commented out)
+                # span.add_event("Attempting Elasticsearch lookup")
+                # es = await self._get_es()
+                # try:
+                #     es_response = await es.get(index="my_db.products", id=product_id)
+                #     if es_response and es_response.get('found', False):
+                #         product_data = es_response['_source']
+                #         product_data['product_id'] = product_id
+                #         
+                #         if 'variants' in product_data and isinstance(product_data['variants'], list):
+                #             variants = []
+                #             for var_item in product_data['variants']:
+                #                 if isinstance(var_item, dict):
+                #                     variants.append({
+                #                         "attributes": var_item.get("attributes", {}),
+                #                         "color": var_item.get("color"), "id": var_item.get("id"),
+                #                         "inventory": var_item.get("inventory", 0),
+                #                         "price": var_item.get("price", {"amount": 0.0, "currency": "USD"}),
+                #                         "sku": var_item.get("sku"), "storage": var_item.get("storage")
+                #                     })
+                #             product_data['variants'] = variants
+                #
+                #         logger.info("Product found in Elasticsearch.", extra={"product_id": product_id})
+                #         span.set_attribute("app.product.source", "elasticsearch")
+                #         span.set_status(Status(StatusCode.OK))
+                #         return ProductResponse(**product_data)
+                # except Exception as es_error:
+                #     logger.warning("Product not found or error in Elasticsearch.", extra={"product_id": product_id, "elasticsearch_error": str(es_error)}, exc_info=False)
+                #     span.add_event("Elasticsearch_lookup_failed_or_not_found", {
+                #         "elasticsearch.error_type": type(es_error).__name__,
+                #         "elasticsearch.error_message": str(es_error)
+                #     })
 
-                        logger.info(f"Product {product_id} found in Elasticsearch.")
-                        span.set_attribute("app.product.source", "elasticsearch")
-                        span.set_status(Status(StatusCode.OK))
-                        return ProductResponse(**product_data)
-                except Exception as es_error: # Catch specific ES errors like NotFoundError if possible
-                    logger.warning(f"Product {product_id} not found or error in Elasticsearch: {str(es_error)}", exc_info=False) # exc_info might be too verbose for not found
-                    span.add_event("Elasticsearch_lookup_failed_or_not_found", {
-                        "elasticsearch.error_type": type(es_error).__name__,
-                        "elasticsearch.error_message": str(es_error)
-                    })
-                    # Do not set span status to ERROR here yet, will try MongoDB
-
-                # 2. Fallback to MongoDB
-                span.add_event("Falling back to MongoDB lookup")
+                span.add_event("Skipping Elasticsearch, going directly to MongoDB lookup")
                 collection = await self._get_read_collection()
-                # PymongoInstrumentor traces find_one
                 product_mongo = await collection.find_one({"_id": ObjectId(product_id)})
                 
                 if product_mongo:
                     product_mongo["product_id"] = str(product_mongo["_id"])
                     del product_mongo["_id"]
-                    # Ensure all fields for ProductResponse are present or have defaults
-                    # This transformation logic should ideally be robust
                     response_data = {
                         key: product_mongo.get(key, ProductResponse.__fields__[key].default)
                         for key in ProductResponse.__fields__ if key in product_mongo or ProductResponse.__fields__[key].default is not None
                     }
-                    response_data.update(product_mongo) # Override defaults with actual values
-                    response_data["product_id"] = product_mongo["product_id"] # Ensure it's set
+                    response_data.update(product_mongo)
+                    response_data["product_id"] = product_mongo["product_id"]
 
-                    logger.info(f"Product {product_id} found in MongoDB after ES miss.")
+                    logger.info("Product found in MongoDB after ES miss.", extra={"product_id": product_id})
                     span.set_attribute("app.product.source", "mongodb")
                     span.set_status(Status(StatusCode.OK))
                     return ProductResponse(**response_data)
 
-                logger.warning(f"Product {product_id} not found in any source.")
+                logger.warning("Product not found in any source.", extra={"product_id": product_id})
                 span.set_attribute("app.product.found", False)
-                # If not found is an error for this operation's contract with its caller
                 span.set_status(Status(StatusCode.ERROR, "Product not found in any source"))
                 return None
 
             except Exception as e:
                 error_message = f"Error getting product {product_id}: {str(e)}"
-                logger.error(error_message, exc_info=True)
+                logger.error("Error getting product", extra={"product_id": product_id, "error": str(e)}, exc_info=True)
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, description=error_message))
                 raise
 
-    # --- Inventory Management Methods (MySQL specific) ---
-    # These methods will have their SQLAlchemy calls traced by SQLAlchemyInstrumentor.
-    # The manual spans here provide business context.
-
     async def _manage_inventory(
         self, operation_name: str, product_id: str, quantity: int,
-        action: callable # (mysql_product, quantity) -> bool or custom result
+        action: callable
     ) -> tuple[bool, str]:
         with self.tracer.start_as_current_span(f"service.product.inventory.{operation_name}") as span:
             span.set_attribute("app.product.id", product_id)
@@ -269,9 +243,8 @@ class ProductService:
             span.set_attribute(SpanAttributes.DB_SYSTEM, "mysql")
 
             try:
-                db = await self._get_write_db() # All inventory ops use write DB with FOR UPDATE
+                db = await self._get_write_db()
                 
-                # Lock the product row for update
                 span.add_event("Acquiring row lock in MySQL")
                 stmt = select(MySQLProduct).where(MySQLProduct.product_id == product_id).with_for_update()
                 result = await db.execute(stmt)
@@ -279,70 +252,57 @@ class ProductService:
 
                 if not mysql_product:
                     message = f"Product {product_id} not found in MySQL for inventory operation."
-                    logger.warning(message)
+                    logger.warning("Product not found in MySQL for inventory operation.", extra={"product_id": product_id})
                     span.set_attribute("app.product.found_in_mysql", False)
-                    span.set_status(Status(StatusCode.ERROR, message)) # Not found is an error for inventory ops
+                    span.set_status(Status(StatusCode.ERROR, message))
                     return False, message
 
                 span.set_attribute("app.product.found_in_mysql", True)
                 span.set_attribute("app.mysql.initial_stock", mysql_product.stock)
                 span.set_attribute("app.mysql.initial_stock_reserved", mysql_product.stock_reserved)
 
-                # Perform the specific inventory action (reserve, release, confirm)
-                success, message = await action(mysql_product, quantity) # Pass db if action needs it for commit
+                success, message = await action(mysql_product, quantity)
 
                 if success:
-                    await db.commit() # Commit changes if action was successful
-                    await db.refresh(mysql_product) # Refresh to get updated state
+                    await db.commit()
+                    await db.refresh(mysql_product)
                     span.set_attribute("app.mysql.final_stock", mysql_product.stock)
                     span.set_attribute("app.mysql.final_stock_reserved", mysql_product.stock_reserved)
                     span.set_status(Status(StatusCode.OK))
-                    logger.info(f"Inventory operation '{operation_name}' for product {product_id} (qty: {quantity}): SUCCESS - {message}")
+                    logger.info("Inventory operation SUCCESS", extra={"operation_name": operation_name, "product_id": product_id, "quantity": quantity, "details": message})
                 else:
-                    # Business logic failure (e.g., insufficient stock).
-                    # Span status might be OK if op completed as designed, or ERROR if this is a failure for the caller.
-                    # Let's consider it a client-side correctable error or a precondition failure.
-                    span.set_status(Status(StatusCode.ERROR, message)) # Or OK if it's not an "error" for the span
-                    logger.warning(f"Inventory operation '{operation_name}' for product {product_id} (qty: {quantity}): FAILED - {message}")
-                    await db.rollback() # Rollback any potential changes made by 'action' if it wasn't purely a check
+                    span.set_status(Status(StatusCode.ERROR, message))
+                    logger.warning("Inventory operation FAILED", extra={"operation_name": operation_name, "product_id": product_id, "quantity": quantity, "details": message})
+                    await db.rollback()
 
                 return success, message
             except Exception as e:
                 error_message = f"Error during inventory operation '{operation_name}' for product {product_id}: {str(e)}"
-                logger.error(error_message, exc_info=True)
+                logger.error("Error during inventory operation", extra={"operation_name": operation_name, "product_id": product_id, "error": str(e)}, exc_info=True)
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, description=error_message))
-                # Attempt to rollback in case of unexpected error during commit or other issues
                 if 'db' in locals() and db.in_transaction():
                     try:
                         await db.rollback()
                         span.add_event("Transaction rolled back due to exception")
                     except Exception as rb_exc:
-                        logger.error(f"Failed to rollback transaction during error handling: {rb_exc}", exc_info=True)
-                        span.record_exception(rb_exc) # Record rollback error too
+                        logger.error("Failed to rollback transaction during error handling", extra={"rollback_error": str(rb_exc)}, exc_info=True)
+                        span.record_exception(rb_exc)
 
-                return False, f"Unexpected error: {str(e)}" # Return a generic error message
+                return False, f"Unexpected error: {str(e)}"
 
     async def check_availability(self, product_id: str, quantity: int) -> tuple[bool, Optional[ProductResponse]]:
-        """제품이 지정된 수량만큼 재고가 있는지 확인 (uses get_product which checks MySQL inventory)"""
-        # This method calls get_product which internally gets inventory from MySQL.
-        # The span for get_product will cover the underlying DB calls.
-        # We can add a span here if check_availability has more logic than just calling get_product.
-        # For now, assuming get_product's tracing is sufficient for the DB part.
         with self.tracer.start_as_current_span("service.product.check_availability") as span:
             span.set_attribute("app.product.id", product_id)
             span.set_attribute("app.request.quantity", quantity)
             try:
-                # Get product details (this might internally fetch inventory from MySQL via ProductResponse if defined so)
-                # The current get_product fetches from ES/Mongo. Inventory should come from MySQL.
-                # Let's use get_product_inventory for a more direct check.
                 inventory_info = await self.get_product_inventory(product_id)
                 
                 if not inventory_info:
-                    logger.warning(f"Product inventory not found for ID {product_id} during availability check.")
+                    logger.warning("Product inventory not found during availability check.", extra={"product_id": product_id})
                     span.set_attribute("app.product.found", False)
                     span.set_status(Status(StatusCode.ERROR, "Product inventory not found"))
-                    return False, None # Product itself not found or inventory info missing
+                    return False, None
 
                 span.set_attribute("app.product.found", True)
                 is_available = inventory_info.available_stock >= quantity
@@ -350,19 +310,14 @@ class ProductService:
                 span.set_attribute("app.inventory.available_stock_checked", inventory_info.available_stock)
                 span.set_attribute("app.inventory.is_available", is_available)
                 span.set_status(Status(StatusCode.OK))
-                logger.info(f"Product {product_id} availability check: requested={quantity}, available={inventory_info.available_stock}, result={is_available}")
+                logger.info("Product availability check", extra={"product_id": product_id, "requested_quantity": quantity, "available_stock": inventory_info.available_stock, "is_available": is_available})
                 
-                # To return ProductResponse, we might need to fetch full product details if only inventory was checked
-                # For now, this matches the original return signature loosely, but returning full ProductResponse
-                # might require another call to get_product if inventory_info doesn't have all fields.
-                # Let's assume the caller only cares about the boolean for now, or get_product is called by caller.
-                # For a consistent ProductResponse, we'd fetch it:
                 product_details = await self.get_product(product_id) if is_available else None
                 return is_available, product_details
 
             except Exception as e:
                 error_message = f"Error checking availability for product {product_id}: {e}"
-                logger.error(error_message, exc_info=True)
+                logger.error("Error checking availability for product", extra={"product_id": product_id, "error": str(e)}, exc_info=True)
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, description=error_message))
                 return False, None
@@ -378,7 +333,7 @@ class ProductService:
         return await self._manage_inventory("check_and_reserve", product_id, quantity, action)
 
     async def reserve_inventory(self, product_id: str, quantity: int) -> bool:
-        success, _ = await self.check_and_reserve_inventory(product_id, quantity) # Uses the combined logic
+        success, _ = await self.check_and_reserve_inventory(product_id, quantity)
         return success
 
     async def release_inventory(self, product_id: str, quantity: int) -> bool:
@@ -406,12 +361,11 @@ class ProductService:
             span.set_attribute("app.product.id", product_id)
             span.set_attribute(SpanAttributes.DB_SYSTEM, "mysql")
             try:
-                db = await self._get_read_db() # Use read replica for inventory lookup if possible
-                # SQLAlchemyInstrumentor traces db.get
-                mysql_product = await db.get(MySQLProduct, product_id) # Assuming product_id is primary key in MySQLProduct
+                db = await self._get_read_db()
+                mysql_product = await db.get(MySQLProduct, product_id)
 
                 if not mysql_product:
-                    logger.warning(f"Product inventory for {product_id} not found in MySQL.")
+                    logger.warning("Product inventory not found in MySQL.", extra={"product_id": product_id})
                     span.set_attribute("app.product.found_in_mysql", False)
                     span.set_status(Status(StatusCode.ERROR, "Product inventory not found"))
                     return None
@@ -431,14 +385,10 @@ class ProductService:
                 )
             except Exception as e:
                 error_message = f"Error getting product inventory for {product_id}: {str(e)}"
-                logger.error(error_message, exc_info=True)
+                logger.error("Error getting product inventory", extra={"product_id": product_id, "error": str(e)}, exc_info=True)
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, description=error_message))
-                raise # Re-raise to be handled by API layer
-
-    # Update other methods (update_product, delete_product, get_products, check_products_exist, get_product_mongodb_only)
-    # with similar tracing patterns: wrap in a span, add attributes, log errors with exc_info=True,
-    # record exceptions on spans, and set span status.
+                raise
 
     async def update_product(self, product_id: str, product_update: ProductUpdate) -> Optional[ProductResponse]:
         with self.tracer.start_as_current_span("service.product.update_product") as span:
@@ -448,39 +398,35 @@ class ProductService:
                 collection = await self._get_write_collection()
                 span.set_attribute(SpanAttributes.DB_MONGODB_COLLECTION, collection.name)
                 
-                # PymongoInstrumentor traces find_one and update_one
                 current_product = await collection.find_one({"_id": ObjectId(product_id)})
                 if not current_product:
-                    logger.warning(f"Product {product_id} not found for update.")
+                    logger.warning("Product not found for update.", extra={"product_id": product_id})
                     span.set_attribute("app.product.found", False)
                     span.set_status(Status(StatusCode.ERROR, "Product not found for update"))
                     return None
                 
                 span.set_attribute("app.product.found", True)
                 update_data = product_update.dict(exclude_unset=True)
-                update_data["updated_at"] = datetime.now(timezone.utc).isoformat() # Ensure UTC
+                update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
 
                 await collection.update_one({"_id": ObjectId(product_id)}, {"$set": update_data})
                 
                 updated_product_mongo = await collection.find_one({"_id": ObjectId(product_id)})
-                # This re-fetch might be optional if update_one result is sufficient or if a write-through cache is used.
-                # For consistency, re-fetching confirms the update.
                 
                 if updated_product_mongo:
                     updated_product_mongo["product_id"] = str(updated_product_mongo["_id"])
                     del updated_product_mongo["_id"]
-                    logger.info(f"Product {product_id} updated successfully.")
+                    logger.info("Product updated successfully.", extra={"product_id": product_id})
                     span.set_status(Status(StatusCode.OK))
                     return ProductResponse(**updated_product_mongo)
-                else: # Should not happen if update was on existing and successful
-                    error_msg = f"Product {product_id} disappeared after update attempt."
-                    logger.error(error_msg)
-                    span.set_status(Status(StatusCode.ERROR, error_msg))
+                else:
+                    logger.error("Product disappeared after update attempt.", extra={"product_id": product_id})
+                    span.set_status(Status(StatusCode.ERROR, f"Product {product_id} disappeared after update attempt."))
                     return None
 
             except Exception as e:
                 error_message = f"Error updating product {product_id}: {str(e)}"
-                logger.error(error_message, exc_info=True)
+                logger.error("Error updating product", extra={"product_id": product_id, "error": str(e)}, exc_info=True)
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, description=error_message))
                 raise
@@ -491,30 +437,21 @@ class ProductService:
             try:
                 collection = await self._get_write_collection()
                 span.set_attribute(SpanAttributes.DB_MONGODB_COLLECTION, collection.name)
-                # PymongoInstrumentor traces delete_one
                 result = await collection.delete_one({"_id": ObjectId(product_id)})
                 
                 if result.deleted_count > 0:
-                    logger.info(f"Product {product_id} deleted successfully from MongoDB.")
+                    logger.info("Product deleted successfully from MongoDB.", extra={"product_id": product_id, "deleted_count": result.deleted_count})
                     span.set_attribute("app.db.deleted_count", result.deleted_count)
                     span.set_status(Status(StatusCode.OK))
-                    # Also delete from MySQL? Current code only deletes from Mongo.
-                    # If MySQL delete is needed, add that logic here, also traced.
-                    # For example:
-                    # db_mysql = await self._get_write_db()
-                    # stmt_mysql_delete = delete(MySQLProduct).where(MySQLProduct.product_id == product_id)
-                    # await db_mysql.execute(stmt_mysql_delete)
-                    # await db_mysql.commit()
-                    # logger.info(f"Product {product_id} also deleted from MySQL.")
                     return True
                 else:
-                    logger.warning(f"Product {product_id} not found in MongoDB for deletion.")
+                    logger.warning("Product not found in MongoDB for deletion.", extra={"product_id": product_id, "deleted_count": 0})
                     span.set_attribute("app.db.deleted_count", 0)
-                    span.set_status(Status(StatusCode.ERROR, "Product not found for deletion")) # Not found is an error for delete op
+                    span.set_status(Status(StatusCode.ERROR, "Product not found for deletion"))
                     return False
             except Exception as e:
                 error_message = f"Error deleting product {product_id}: {str(e)}"
-                logger.error(error_message, exc_info=True)
+                logger.error("Error deleting product", extra={"product_id": product_id, "error": str(e)}, exc_info=True)
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, description=error_message))
                 raise
@@ -528,14 +465,12 @@ class ProductService:
             try:
                 span.add_event("Attempting Elasticsearch search for product list")
                 es = await self._get_es()
-                # ElasticsearchInstrumentor traces es.search
                 es_query = {"query": {"match_all": {}}, "from": skip, "size": limit}
-                response = await es.search(index="my_db.products", body=es_query) # Ensure index name
+                response = await es.search(index="my_db.products", body=es_query)
                 
                 for hit in response.get('hits', {}).get('hits', []):
                     product_data = hit['_source']
-                    product_data['product_id'] = hit['_id'] # ES _id is usually the product_id
-                     # Data transformation for variants (copied from your get_product)
+                    product_data['product_id'] = hit['_id']
                     if 'variants' in product_data and isinstance(product_data['variants'], list):
                         variants = []
                         for var_item in product_data['variants']:
@@ -550,30 +485,27 @@ class ProductService:
                         product_data['variants'] = variants
                     products_response_list.append(ProductResponse(**product_data))
                 
-                logger.info(f"Retrieved {len(products_response_list)} products from Elasticsearch (skip={skip}, limit={limit}).")
+                logger.info("Retrieved products from Elasticsearch.", extra={"count": len(products_response_list), "skip": skip, "limit": limit})
                 span.set_attribute("app.products.source", "elasticsearch")
                 span.set_attribute("app.products.retrieved_count", len(products_response_list))
                 span.set_status(Status(StatusCode.OK))
                 return products_response_list
 
             except Exception as es_error:
-                logger.error(f"Error getting products from Elasticsearch (skip={skip}, limit={limit}): {es_error}", exc_info=True) # Log ES error
-                span.record_exception(es_error) # Record ES error on span
+                logger.error("Error getting products from Elasticsearch.", extra={"skip": skip, "limit": limit, "error": str(es_error)}, exc_info=True)
+                span.record_exception(es_error)
                 span.add_event("Elasticsearch_search_failed_falling_back_to_mongodb", {
                     "elasticsearch.error_type": type(es_error).__name__,
                     "elasticsearch.error_message": str(es_error)
                 })
 
-                # Fallback to MongoDB
                 try:
                     collection = await self._get_read_collection()
                     span.set_attribute(SpanAttributes.DB_MONGODB_COLLECTION, collection.name)
-                    # PymongoInstrumentor traces find
                     mongo_cursor = collection.find().skip(skip).limit(limit)
                     async for product_mongo in mongo_cursor:
                         product_mongo["product_id"] = str(product_mongo["_id"])
                         del product_mongo["_id"]
-                        # Data transformation for variants (copied from your get_product)
                         if 'variants' in product_mongo and isinstance(product_mongo['variants'], list):
                             variants = []
                             for var_item in product_mongo['variants']:
@@ -588,17 +520,17 @@ class ProductService:
                             product_mongo['variants'] = variants
                         products_response_list.append(ProductResponse(**product_mongo))
                     
-                    logger.info(f"Retrieved {len(products_response_list)} products from MongoDB (fallback) (skip={skip}, limit={limit}).")
+                    logger.info("Retrieved products from MongoDB (fallback).", extra={"count": len(products_response_list), "skip": skip, "limit": limit})
                     span.set_attribute("app.products.source", "mongodb_fallback")
                     span.set_attribute("app.products.retrieved_count_mongodb", len(products_response_list))
-                    span.set_status(Status(StatusCode.OK)) # OK because we successfully fell back
+                    span.set_status(Status(StatusCode.OK))
                     return products_response_list
                 except Exception as mongo_error:
                     error_message = f"Error getting products from MongoDB after ES fallback (skip={skip}, limit={limit}): {mongo_error}"
-                    logger.error(error_message, exc_info=True)
-                    span.record_exception(mongo_error) # Record the MongoDB error too
+                    logger.error("Error getting products from MongoDB after ES fallback.", extra={"skip": skip, "limit": limit, "error": str(mongo_error)}, exc_info=True)
+                    span.record_exception(mongo_error)
                     span.set_status(Status(StatusCode.ERROR, description=error_message))
-                    raise # Re-raise the original ES error or a new one indicating full failure
+                    raise
 
     async def check_products_exist(self, product_ids: List[str]) -> ProductsExistResponse:
         with self.tracer.start_as_current_span("service.product.check_products_exist") as span:
@@ -612,12 +544,7 @@ class ProductService:
                 collection = await self._get_read_collection()
                 span.set_attribute(SpanAttributes.DB_MONGODB_COLLECTION, collection.name)
 
-                # Perform finds. PymongoInstrumentor will trace each find_one.
-                # For many IDs, a single $in query might be more efficient if MongoDB supports it well for your use case.
-                # Example with individual find_one for direct mapping to current logic:
                 for p_id_str in product_ids:
-                    # Create child span for each ID check if very granular detail is needed, or just rely on Pymongo spans.
-                    # For now, let's keep it simpler and rely on PymongoInstrumentor for sub-traces.
                     try:
                         obj_id = ObjectId(p_id_str)
                         product = await collection.find_one({"_id": obj_id})
@@ -625,9 +552,9 @@ class ProductService:
                             existing_found_ids.append(p_id_str)
                         else:
                             missing_checked_ids.append(p_id_str)
-                    except Exception: # Handles invalid ObjectId format or other find_one errors for a specific ID
-                        logger.warning(f"Invalid product ID format or error checking existence for ID: {p_id_str}", exc_info=False)
-                        missing_checked_ids.append(p_id_str) # Assume missing if ID format is bad
+                    except Exception:
+                        logger.warning("Invalid product ID format or error checking existence for ID.", extra={"product_id": p_id_str}, exc_info=False)
+                        missing_checked_ids.append(p_id_str)
                         span.add_event("invalid_product_id_format_in_check_exist", {"product_id": p_id_str})
                 
                 span.set_attribute("app.response.existing_ids_count", len(existing_found_ids))
@@ -637,10 +564,10 @@ class ProductService:
 
             except Exception as e:
                 error_message = f"Error checking product existence for {len(product_ids)} IDs: {str(e)}"
-                logger.error(error_message, exc_info=True)
+                logger.error("Error checking product existence.", extra={"product_ids_count": len(product_ids), "error": str(e)}, exc_info=True)
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, description=error_message))
-                raise # Re-raise to be handled by API layer
+                raise
 
 
     async def get_product_mongodb_only(self, product_id: str) -> Optional[ProductResponse]:
@@ -651,13 +578,11 @@ class ProductService:
             try:
                 collection = await self._get_read_collection()
                 span.set_attribute(SpanAttributes.DB_MONGODB_COLLECTION, collection.name)
-                # PymongoInstrumentor traces find_one
                 product_mongo = await collection.find_one({"_id": ObjectId(product_id)})
                 
                 if product_mongo:
                     product_mongo["product_id"] = str(product_mongo["_id"])
                     del product_mongo["_id"]
-                     # Data transformation (copied from your get_product)
                     response_data = {
                         key: product_mongo.get(key, ProductResponse.__fields__[key].default)
                         for key in ProductResponse.__fields__ if key in product_mongo or ProductResponse.__fields__[key].default is not None
@@ -665,18 +590,18 @@ class ProductService:
                     response_data.update(product_mongo)
                     response_data["product_id"] = product_mongo["product_id"]
 
-                    logger.info(f"Product {product_id} found directly in MongoDB (benchmark).")
+                    logger.info("Product found directly in MongoDB (benchmark).", extra={"product_id": product_id})
                     span.set_attribute("app.product.found", True)
                     span.set_status(Status(StatusCode.OK))
                     return ProductResponse(**response_data)
                 else:
-                    logger.warning(f"Product {product_id} not found in MongoDB (benchmark).")
+                    logger.warning("Product not found in MongoDB (benchmark).", extra={"product_id": product_id})
                     span.set_attribute("app.product.found", False)
-                    span.set_status(Status(StatusCode.ERROR, "Product not found in MongoDB (benchmark)")) # Explicit not found
+                    span.set_status(Status(StatusCode.ERROR, "Product not found in MongoDB (benchmark)"))
                     return None
             except Exception as e:
                 error_message = f"Error getting product (benchmark) {product_id} from MongoDB: {str(e)}"
-                logger.error(error_message, exc_info=True)
+                logger.error("Error getting product (benchmark) from MongoDB.", extra={"product_id": product_id, "error": str(e)}, exc_info=True)
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, description=error_message))
                 raise

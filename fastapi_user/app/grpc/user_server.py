@@ -6,49 +6,49 @@ import user_pb2
 import user_pb2_grpc
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
+import asyncio
 
-# 로깅 설정
-logging.basicConfig(level=logging.INFO)
+# 로깅 설정 (basicConfig removed, setup_logging in main.py handles this)
+# logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class UserService(user_pb2_grpc.UserServiceServicer):
     def __init__(self):
         self.user_manager = UserManager()
-        self.tracer = trace.get_tracer(__name__)
-        logger.info("UserService initialized")
+        self.tracer = trace.get_tracer(__name__) # Tracer per instance or module
+        logger.info("UserService gRPC servicer initialized.", extra={"service_name": "UserServiceGRPC"})
 
     async def GetUser(self, request, context):
+        # It's common to get tracer at module level or once in __init__
+        # tracer = trace.get_tracer(__name__) # This can be moved to __init__ or module level
         with self.tracer.start_as_current_span("grpc.server.get_user") as span:
-            try:
-                # 요청 정보 추적
-                span.set_attribute("user.id", request.user_id)
-                logger.info(f"GetUser request received for user_id: {request.user_id}")
+            user_id_req = request.user_id
+            span.set_attribute("app.user.id_requested", user_id_req)
+            logger.info("GetUser gRPC request received.", extra={"requested_user_id": user_id_req, "method": "GetUser"})
 
-                try:
-                    user = await self.user_manager.get_user_by_id(request.user_id)
-                except Exception as e:
-                    logger.error(f"Error converting user_id to ObjectId: {str(e)}")
-                    span.set_status(Status(StatusCode.ERROR, f"Invalid user ID format: {str(e)}"))
-                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                    context.set_details(f"Invalid user ID format: {str(e)}")
-                    return user_pb2.UserResponse()
-                    
+            try:
+                # The original code had a nested try-except for ObjectId conversion.
+                # It's better to handle it as part of the main try-catch or specifically if needed.
+                # For now, assuming get_user_by_id handles potential ObjectId conversion errors gracefully
+                # or they fall into the generic Exception catch.
+                user = await self.user_manager.get_user_by_id(user_id_req)
+                                
                 if not user:
-                    logger.warning(f"User not found: {request.user_id}")
-                    span.set_status(Status(StatusCode.ERROR, f"User {request.user_id} not found"))
+                    logger.warning("User not found by ID in gRPC GetUser.", extra={"requested_user_id": user_id_req, "found": False})
+                    span.set_attribute("app.user.found", False)
+                    span.set_status(Status(StatusCode.ERROR, f"User {user_id_req} not found"))
                     context.set_code(grpc.StatusCode.NOT_FOUND)
-                    context.set_details(f"User {request.user_id} not found")
+                    context.set_details(f"User {user_id_req} not found")
                     return user_pb2.UserResponse()
                 
-                # 사용자 정보 추적 (민감한 정보는 제외)
+                span.set_attribute("app.user.found", True)
                 span.set_attributes({
-                    "user.name": user.name,
-                    "user.age": user.age,
-                    "user.occupation": user.occupation,
-                    "user.learning": user.learning
+                    "app.user.name": user.name,
+                    "app.user.age": user.age,
+                    # Add other relevant, non-sensitive attributes
                 })
                 
-                logger.info(f"User found: {user}")
+                logger.info("User found and retrieved successfully in gRPC GetUser.", extra={"user_id": str(user.id), "user_name": user.name})
                 span.set_status(Status(StatusCode.OK))
                 
                 return user_pb2.UserResponse(
@@ -58,11 +58,23 @@ class UserService(user_pb2_grpc.UserServiceServicer):
                     occupation=user.occupation,
                     learning=user.learning
                 )
+            except ValueError as ve: # Catching specific error like invalid ID format if get_user_by_id raises it
+                logger.error("Invalid user ID format in gRPC GetUser.", 
+                             extra={"requested_user_id": user_id_req, "error": str(ve)}, 
+                             exc_info=True)
+                span.set_status(Status(StatusCode.ERROR, f"Invalid user ID format: {str(ve)}"))
+                span.record_exception(ve)
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(f"Invalid user ID format: {str(ve)}")
+                return user_pb2.UserResponse()
             except Exception as e:
-                logger.error(f"Error in GetUser: {str(e)}")
+                logger.error("Generic error in gRPC GetUser.", 
+                             extra={"requested_user_id": user_id_req, "error": str(e)}, 
+                             exc_info=True)
                 span.set_status(Status(StatusCode.ERROR, str(e)))
+                span.record_exception(e)
                 context.set_code(grpc.StatusCode.INTERNAL)
-                context.set_details(str(e))
+                context.set_details(f"Internal server error: {str(e)}")
                 return user_pb2.UserResponse()
 
 async def serve():
@@ -71,7 +83,14 @@ async def serve():
         UserService(), server
     )
     server.add_insecure_port('[::]:50051')
-    logger.info("Starting gRPC server on port 50051")
+    logger.info("Starting gRPC server.", extra={"port": 50051, "address": "[::]:50051"})
     await server.start()
-    logger.info("gRPC server started successfully")
-    await server.wait_for_termination() 
+    logger.info("gRPC server started successfully and listening.", extra={"port": 50051})
+    try:
+        await server.wait_for_termination()
+    except asyncio.CancelledError:
+        logger.info("gRPC server shutting down due to cancellation.", extra={"shutdown_event": "cancelled"})
+    except Exception as e:
+        logger.error("gRPC server encountered an error during wait_for_termination.", extra={"error": str(e)}, exc_info=True)
+    finally:
+        logger.info("gRPC server has terminated.", extra={"shutdown_event": "terminated"}) 

@@ -1,43 +1,86 @@
 import logging
+import sys
+import json
+from datetime import datetime
 from logging.config import dictConfig
 import socket
 
-# 로깅 설정
-log_config = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    "formatters": {
-        # 이 formatters 설정은 콘솔에 로그 찍힐 때만 적용될 가능성이 높다.
-        # OTel 로깅 파이프라인 타는 데이터는 OTel 자체 형식으로 나간다.
-        "json": {
-            "format": "%(asctime)s %(levelname)s %(name)s %(message)s %(hostname)s",
-            "datefmt": "%Y-%m-%d %H:%M:%S",
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (set, frozenset)):
+            return list(obj)
+        return super().default(obj)
+
+class JsonFormatter(logging.Formatter):
+    def format(self, record):
+        # 기본 로그 레코드 데이터
+        log_data = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "hostname": socket.gethostname()
         }
-    },
-    "handlers": {
-        "console": {
-            "class": "logging.StreamHandler",
-            "formatter": "json",
-            "stream": "ext://sys.stdout",
+
+        # 예외 정보가 있는 경우 추가
+        if record.exc_info:
+            log_data["exception"] = {
+                "type": record.exc_info[0].__name__,
+                "message": str(record.exc_info[1]),
+                "stack_trace": self.formatException(record.exc_info)
+            }
+
+        # extra 필드 추가
+        if hasattr(record, "extra"):
+            log_data.update(record.extra)
+
+        return json.dumps(log_data, cls=CustomJSONEncoder)
+
+def setup_logging():
+    # The OpenTelemetry TracerProvider and LoggingInstrumentor setup 
+    # has been moved to app.config.otel.setup_telemetry()
+
+    # 로깅 설정 적용 (dictConfig 사용)
+    log_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "json": {
+                "()": "app.config.logging.JsonFormatter" # Ensure full path for custom class
+            }
         },
-    },
-    "loggers": {
-        "app": {
-            "handlers": ["console"],
-            "level": "INFO",
-            "propagate": True
+        "handlers": {
+            "console": {
+                "class": "logging.StreamHandler",
+                "formatter": "json",
+                "stream": "ext://sys.stdout",
+            }
         },
-        "": { # Root logger
-            "handlers": ["console"],
-            "level": "INFO", # 기본 레벨 (DEBUG로 하면 OTel 내부 로그까지 다 볼 수 있음)
-            "propagate": False # Root 로거가 다시 상위로 전파할 필요는 없다
+        "loggers": {
+            "app": { # Specific logger for "app" context
+                "handlers": ["console"],
+                "level": "INFO",
+                "propagate": False # Do not propagate to root if it has similar handlers
+            },
+            "": {  # Root logger
+                "handlers": ["console"],
+                "level": "INFO",
+                # "propagate": False # Root logger propagation is not applicable
+            },
+            "uvicorn.access": { # To control uvicorn access logs if needed
+                "handlers": ["console"],
+                "level": "WARNING", # Or your desired level
+                "propagate": False
+            },
+            "uvicorn.error": {
+                "handlers": ["console"],
+                "level": "INFO", # Or your desired level
+                "propagate": False
+            }
         }
     }
-}
+    dictConfig(log_config)
 
-# 로깅 설정 적용
-dictConfig(log_config)
-logger = logging.getLogger("app")
-
-# hostname 추가
-logger = logging.LoggerAdapter(logger, {'hostname': socket.gethostname()})
+    # gRPC 로깅 레벨 조정 (dictConfig 이후에 해도 되고, dictConfig 내 logger 설정으로도 가능)
+    logging.getLogger('grpc').setLevel(logging.WARNING)
+    logging.getLogger('grpc.aio').setLevel(logging.WARNING)

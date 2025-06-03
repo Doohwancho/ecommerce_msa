@@ -35,7 +35,6 @@ async def init_kafka_consumer():
         span.set_attribute("app.kafka.subscribed_topics_for_order_module", PAYMENT_EVENTS_TOPIC) 
 
         if kafka_consumer is not None:
-            logger.info("OrderModule Kafka consumer already initialized.")
             span.add_event("OrderModuleConsumerAlreadyInitialized")
             span.set_status(Status(StatusCode.OK, "Already initialized"))
             return
@@ -70,11 +69,18 @@ async def init_kafka_consumer():
             
             await kafka_consumer.start()
             
-            logger.info(f"OrderModule Kafka consumer started, listening to topic: {PAYMENT_EVENTS_TOPIC} for payment events")
+            logger.info("OrderModule Kafka consumer started", extra={
+                "topic": PAYMENT_EVENTS_TOPIC,
+                "group_id": KAFKA_CONSUMER_GROUP
+            })
             span.set_status(Status(StatusCode.OK))
 
         except Exception as e:
-            logger.error(f"Failed to initialize OrderModule Kafka consumer: {e}", exc_info=True)
+            logger.error("Failed to initialize OrderModule Kafka consumer", extra={
+                "error": str(e),
+                "bootstrap_servers": KAFKA_BOOTSTRAP_SERVERS,
+                "group_id": KAFKA_CONSUMER_GROUP
+            }, exc_info=True)
             if span.is_recording():
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, f"Order Kafka consumer init failed: {str(e)}"))
@@ -82,62 +88,61 @@ async def init_kafka_consumer():
             raise
 
 
-async def handle_payment_success_wrapper(event_data):
+async def handle_payment_success_wrapper(event_data, parent_context=None):
     """payment_success 이벤트를 처리하는 래퍼 함수. OTel 트레이싱 적용."""
-    # 이 함수는 OrderKafkaConsumer에 의해 호출되며, 이미 부모 Kafka Consumer 스팬 컨텍스트 내에서 실행됩니다.
-    # 여기서는 해당 비즈니스 로직 처리를 위한 자식 스팬을 생성합니다.
-    with tracer.start_as_current_span("HandlePaymentSuccess", kind=SpanKind.INTERNAL) as span:
+    with tracer.start_as_current_span(
+        "HandlePaymentSuccess", 
+        context=parent_context,  # 명시적으로 부모 컨텍스트 설정
+        kind=SpanKind.INTERNAL
+    ) as span:
         try:
             logger.info(f"Handling payment_success event: {event_data}")
             span.set_attribute("app.event.type", "payment_success")
             if isinstance(event_data, dict):
-                # 중요 정보나 식별자를 속성으로 추가 (민감 정보 주의)
                 order_id = event_data.get('order_id')
                 payment_id = event_data.get('payment_id')
                 if order_id:
                     span.set_attribute("app.order_id", str(order_id))
                 if payment_id:
                     span.set_attribute("app.payment_id", str(payment_id))
-                # event_data 전체를 저장하는 것은 데이터 크기나 민감 정보 유출 위험으로 권장되지 않음
-                # 필요한 경우 안전한 형태로 일부만 저장:
-                # span.set_attribute("app.event.data_preview", json.dumps(event_data, ensure_ascii=False)[:256])
 
-
-            async with AsyncSessionLocal() as session: # SQLAlchemyInstrumentor가 DB 작업 스팬 자동 생성
+            async with AsyncSessionLocal() as session:
                 order_manager = OrderManager(session)
                 await order_manager.handle_payment_success(event_data)
             
             span.set_status(Status(StatusCode.OK))
             logger.info("Payment success event processed successfully.")
-
         except Exception as e:
             logger.error(f"Error handling payment_success_event: {e}", exc_info=True)
             if span.is_recording():
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, str(e)))
-            raise # 필요한 경우 예외를 다시 발생시켜 상위에서 처리하도록 할 수 있음
+            raise
 
-async def handle_payment_failed_wrapper(event_data):
+async def handle_payment_failed_wrapper(event_data, parent_context=None):
     """payment_failed 이벤트를 처리하는 래퍼 함수. OTel 트레이싱 적용."""
-    with tracer.start_as_current_span("HandlePaymentFailed", kind=SpanKind.INTERNAL) as span:
+    with tracer.start_as_current_span(
+        "HandlePaymentFailed",
+        context=parent_context,  # 명시적으로 부모 컨텍스트 설정
+        kind=SpanKind.INTERNAL
+    ) as span:
         try:
             logger.info(f"Handling payment_failed event: {event_data}")
             span.set_attribute("app.event.type", "payment_failed")
             if isinstance(event_data, dict):
                 order_id = event_data.get('order_id')
-                error_message = event_data.get('error_message')
+                error_message = event_data.get('error_message') or event_data.get('reason')
                 if order_id:
                     span.set_attribute("app.order_id", str(order_id))
                 if error_message:
                      span.set_attribute("app.payment.error_message", str(error_message))
 
-            async with AsyncSessionLocal() as session: # SQLAlchemyInstrumentor가 DB 작업 스팬 자동 생성
+            async with AsyncSessionLocal() as session:
                 order_manager = OrderManager(session)
                 await order_manager.handle_payment_failed(event_data)
 
             span.set_status(Status(StatusCode.OK))
             logger.info("Payment failed event processed successfully.")
-
         except Exception as e:
             logger.error(f"Error handling payment_failed_event: {e}", exc_info=True)
             if span.is_recording():
@@ -158,12 +163,13 @@ async def stop_kafka_consumer():
                 logger.info("Kafka consumer stopped successfully")
                 span.set_status(Status(StatusCode.OK))
             except Exception as e:
-                logger.error(f"Failed to stop Kafka consumer: {e}", exc_info=True)
+                logger.error("Failed to stop Kafka consumer", extra={
+                    "error": str(e)
+                }, exc_info=True)
                 if span.is_recording():
                     span.record_exception(e)
                     span.set_status(Status(StatusCode.ERROR, f"Kafka consumer stop failed: {str(e)}"))
                 raise # 또는 다른 오류 처리
         else:
-            logger.info("Kafka consumer was not running.")
             span.add_event("ConsumerNotRunning")
             span.set_status(Status(StatusCode.OK, "Not running"))

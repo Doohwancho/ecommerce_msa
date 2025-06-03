@@ -25,7 +25,7 @@ def get_write_mongo_client():
     if _write_mongo_client is None:
         connection_string = f"mongodb://{MONGODB_USERNAME}:{MONGODB_PASSWORD}@{MONGODB_HOST}/user_database?replicaSet={MONGODB_REPLICA_SET}&authSource={MONGODB_AUTH_SOURCE}&readPreference=primary"
         _write_mongo_client = AsyncIOMotorClient(connection_string)
-        logger.info("MongoDB write client initialized")
+        logger.info("MongoDB write client initialized.", extra={"db_type": "mongodb", "client_type": "write", "connection_string": connection_string})
     
     return _write_mongo_client
 
@@ -38,7 +38,7 @@ def get_read_mongo_client():
     if _read_mongo_client is None:
         connection_string = f"mongodb://{MONGODB_USERNAME}:{MONGODB_PASSWORD}@{MONGODB_HOST}/user_database?replicaSet={MONGODB_REPLICA_SET}&authSource={MONGODB_AUTH_SOURCE}&readPreference=secondary"
         _read_mongo_client = AsyncIOMotorClient(connection_string)
-        logger.info("MongoDB read client initialized")
+        logger.info("MongoDB read client initialized.", extra={"db_type": "mongodb", "client_type": "read", "connection_string": connection_string})
     
     return _read_mongo_client
 
@@ -54,13 +54,13 @@ async def get_write_users_collection() -> AgnosticCollection:
         collection_names = await mongo_db.list_collection_names()
         if "users" not in collection_names:
             await mongo_db.create_collection("users")
-            logger.info("Created users collection")
+            logger.info("Created users collection in user_database.", extra={"db_name": "user_database", "collection_name": "users"})
         
         users_collection = mongo_db.users
-        logger.info("MongoDB write connection successful and collection verified")
+        logger.info("MongoDB write connection successful and users collection verified.", extra={"db_name": "user_database", "collection_name": "users", "access_type": "write"})
         return users_collection
     except Exception as e:
-        logger.error(f"MongoDB write connection error: {e}")
+        logger.error("MongoDB write connection error.", extra={"db_name": "user_database", "collection_name": "users", "access_type": "write", "error": str(e)}, exc_info=True)
         return None
 
 async def get_read_users_collection() -> AgnosticCollection:
@@ -71,8 +71,8 @@ async def get_read_users_collection() -> AgnosticCollection:
         mongo_client = get_read_mongo_client()
         mongo_db = mongo_client.user_database
         users_collection = mongo_db.users
-        logger.info("MongoDB read connection successful")
+        logger.info("MongoDB read connection successful for users collection.", extra={"db_name": "user_database", "collection_name": "users", "access_type": "read"})
         return users_collection
     except Exception as e:
-        logger.error(f"MongoDB read connection error: {e}")
+        logger.error("MongoDB read connection error.", extra={"db_name": "user_database", "collection_name": "users", "access_type": "read", "error": str(e)}, exc_info=True)
         return None

@@ -90,11 +90,10 @@ class OrderManager:
                 # 여기서 예외를 다시 발생시키지 않으면 실패 이벤트 저장 실패가 호출자에게 알려지지 않음
 
     async def create_order(self, order_data: OrderCreate):
-        """새로운 주문을 생성하고 Outbox 이벤트를 기록합니다 (Outbox 패턴 ver2)."""
+        """새로운 주문을 생성하고 Outbox 이벤트를 기록합니다."""
         with tracer.start_as_current_span("OrderManager.create_order") as span:
             span.set_attribute("app.user_id", order_data.user_id)
             span.set_attribute("app.item_count", len(order_data.items))
-            logger.info(f"Creating a new order for user_id: {order_data.user_id}")
             
             reserved_items = []
 
@@ -102,23 +101,24 @@ class OrderManager:
                 # Step 1: 사용자 존재 확인 (gRPC 호출)
                 span.add_event("ValidatingUser")
                 try:
-                    logger.info(f"Validating user {order_data.user_id} via gRPC")
-                    user = await self.user_client.get_user(order_data.user_id) # 자동 계측 (GrpcInstrumentorClient)
+                    user = await self.user_client.get_user(order_data.user_id)
                     if not user:
-                        logger.error(f"User {order_data.user_id} not found")
+                        logger.error("User not found", extra={"user_id": order_data.user_id})
                         span.set_attribute("app.validation.error", "UserNotFound")
                         raise HTTPException(status_code=404, detail=f"User {order_data.user_id} not found")
-                    logger.info(f"User {order_data.user_id} validated successfully")
                     span.add_event("UserValidated", {"user_id": order_data.user_id})
                 except Exception as e:
-                    logger.error(f"Error validating user {order_data.user_id}: {str(e)}", exc_info=True)
+                    logger.error("Error validating user", extra={
+                        "user_id": order_data.user_id,
+                        "error": str(e)
+                    }, exc_info=True)
                     span.record_exception(e)
                     span.set_attribute("app.validation.error", "UserClientError")
                     raise HTTPException(status_code=400, detail=f"Invalid user ID or user service error: {str(e)}")
 
-                # Step 2: 상품 가용성 체크, 예약 및 가격 계산 (gRPC 호출)
+                # Step 2: 상품 가용성 체크, 예약 및 가격 계산
                 total_amount = 0.0
-                order_items_payload = [] # outbox 페이로드용
+                order_items_payload = []
                 products_info_cache = {}
 
                 for item_idx, item_data in enumerate(order_data.items):
@@ -126,34 +126,29 @@ class OrderManager:
                         item_span.set_attribute("app.product_id", item_data.product_id)
                         item_span.set_attribute("app.quantity", item_data.quantity)
                         
-                        logger.info(f"Processing item {item_idx + 1}/{len(order_data.items)}: product_id={item_data.product_id}, quantity={item_data.quantity}")
-                        
                         item_span.add_event("ReservingInventory")
-                        # 재고 확인 및 예약 (gRPC)
-                        logger.info(f"Checking and reserving inventory for product {item_data.product_id}")
                         success, message = await self.product_client.check_and_reserve_inventory(
                             item_data.product_id, item_data.quantity
-                        ) # 자동 계측
+                        )
                         if not success:
-                            logger.error(f"Failed to reserve inventory for product {item_data.product_id}: {message}")
+                            logger.error("Failed to reserve inventory", extra={
+                                "product_id": item_data.product_id,
+                                "quantity": item_data.quantity,
+                                "error": message
+                            })
                             item_span.set_attribute("app.inventory.error", message)
                             item_span.set_status(Status(StatusCode.ERROR, "InventoryReservationFailed"))
-                            # 예약 실패 시 이미 예약된 다른 상품들의 예약 취소 로직 필요 (SAGA 패턴의 일부)
-                            # 현재 코드에는 없으므로 예외 발생으로 전체 롤백 유도
                             raise HTTPException(status_code=400, detail=f"Failed to reserve product {item_data.product_id}: {message}")
-                        logger.info(f"Successfully reserved inventory for product {item_data.product_id}")
+                        
                         reserved_items.append((item_data.product_id, item_data.quantity))
                         item_span.add_event("InventoryReserved")
 
-                        # 제품 정보 가져오기 (gRPC)
                         item_span.add_event("FetchingProductDetails")
-                        logger.info(f"Fetching product details for {item_data.product_id}")
-                        product = await self.product_client.get_product(item_data.product_id) # 자동 계측
+                        product = await self.product_client.get_product(item_data.product_id)
                         if not product:
-                            logger.error(f"Product {item_data.product_id} not found")
+                            logger.error("Product not found", extra={"product_id": item_data.product_id})
                             raise HTTPException(status_code=404, detail=f"Product {item_data.product_id} not found")
-                        logger.info(f"Successfully fetched product details for {item_data.product_id}")
-                        # inventory = await self.product_client.get_product_inventory(item_data.product_id) # 필요시
+                        
                         products_info_cache[item_data.product_id] = {'product': product}
                         item_span.add_event("ProductDetailsFetched", {"price": product.price})
 
@@ -166,27 +161,22 @@ class OrderManager:
                         item_span.set_status(Status(StatusCode.OK))
                 
                 span.set_attribute("app.order.calculated_total_amount", total_amount)
-                logger.info(f"Total order amount calculated: {total_amount}")
 
-                # Step 3: 트랜잭션 시작 및 DB 작업 (Order, OrderItem, Outbox 생성)
-                db = await self._get_write_db() # SQLAlchemyInstrumentor가 DB 작업 계측
+                # Step 3: 트랜잭션 시작 및 DB 작업
+                db = await self._get_write_db()
                 async with db.begin():
                     span.add_event("DatabaseTransactionStarted")
-                    logger.info("Starting database transaction")
-                    # Order 생성
+                    
                     order = Order(
                         user_id=order_data.user_id,
                         status=OrderStatus.PENDING,
                         total_amount=total_amount,
-                        # created_at, updated_at은 DB model에서 default 설정 가능
                     )
                     db.add(order)
-                    await db.flush() # order_id를 얻기 위해 flush
-                    logger.info(f"Order record created with ID: {order.order_id}")
+                    await db.flush()
                     span.set_attribute("app.order_id", str(order.order_id))
                     span.add_event("OrderRecordFlushed", {"order.id_assigned": str(order.order_id)})
 
-                    # OrderItem 생성
                     for item_data in order_data.items:
                         product_info = products_info_cache[item_data.product_id]
                         order_item = OrderItem(
@@ -196,25 +186,16 @@ class OrderManager:
                             price_at_order=product_info['product'].price
                         )
                         db.add(order_item)
-                        logger.info(f"Order item created for product {item_data.product_id}")
                     
-                    # context propagation (opentelemetry-tracing for 분리된 모듈의 비동기 통신, CDC -> kafka)
-                    # 현재 활성화된 스팬(OrderManager.create_order)의 컨텍스트를 가져옴
-                    current_otel_span = trace.get_current_span() 
-                    # 주입할 컨텍스트 생성 (현재 스팬을 포함)
+                    current_otel_span = trace.get_current_span()
                     context_to_propagate = trace.set_span_in_context(current_otel_span)
-                    
-                    carrier = {} # W3C Trace Context 헤더를 담을 딕셔너리
-                    # 전역 프로파게이터 (기본적으로 W3C TraceContextTextMapPropagator)를 사용하여 컨텍스트 주입
+                    carrier = {}
                     propagator = propagate.get_global_textmap()
                     propagator.inject(carrier, context=context_to_propagate)
-                    # 이제 carrier는 {'traceparent': '...', 'tracestate': '...'} 와 같은 값을 가짐
 
                     span.add_event("TraceContextInjectedToCarrierForOutbox", 
                                {"traceparent": carrier.get('traceparent'), "tracestate": carrier.get('tracestate')})
 
-                    
-                    # Outbox 이벤트 페이로드에 주입된 컨텍스트(carrier) 포함
                     order_created_event_payload = {
                         'type': "order_created",
                         'order_id': str(order.order_id),
@@ -229,55 +210,65 @@ class OrderManager:
                         id=str(uuid.uuid4()),
                         aggregatetype="order",
                         aggregateid=str(order.order_id),
-                        type="order_created", # Kafka 메시지 헤더의 eventType으로 사용될 수 있음
+                        type="order_created",
                         payload=order_created_event_payload,
                         traceparent_for_header=carrier.get('traceparent'), 
                         tracestate_for_header=carrier.get('tracestate')
                     )
                     db.add(outbox_event)
-                    logger.info(f"Outbox event created for order {order.order_id}")
                     span.add_event("OutboxEventPrepared", {"outbox.event.type": "order_created"})
 
-                    # await db.commit() # async with db.begin() 사용 시 자동 커밋/롤백
                 span.add_event("DatabaseTransactionCommitted")
-                logger.info(f"Order {order.order_id} created successfully with outbox event")
+                logger.info("Order created successfully", extra={
+                    "order_id": str(order.order_id),
+                    "user_id": order_data.user_id,
+                    "total_amount": total_amount,
+                    "item_count": len(order_data.items)
+                })
                 span.set_status(Status(StatusCode.OK))
-                return { # API 응답 형식에 맞게 반환
-                    "order_id": str(order.order_id), # 문자열로 변환하여 일관성 유지
-                    "status": "PENDING", # 주문의 초기 상태
+                return {
+                    "order_id": str(order.order_id),
+                    "status": "PENDING",
                     "message": "Order created successfully and pending payment."
                 }
 
-            except HTTPException as http_exc: # HTTP 예외는 그대로 전달
-                logger.error(f"HTTP error in create_order: {http_exc.detail}")
+            except HTTPException as http_exc:
+                logger.error("HTTP error in create_order", extra={
+                    "error": http_exc.detail,
+                    "user_id": order_data.user_id
+                })
                 span.record_exception(http_exc)
                 span.set_status(Status(StatusCode.ERROR, http_exc.detail))
-                # 예약된 재고 롤백 (SAGA 보상 트랜잭션)
                 if reserved_items:
                     span.add_event("RollingBackReservedInventory", {"item_count": len(reserved_items)})
-                    logger.info(f"Rolling back inventory reservations for {len(reserved_items)} items")
                     for prod_id, qty in reserved_items:
                         try:
-                            await self.product_client.cancel_inventory_reservation(prod_id, qty) # 자동 계측
-                            logger.info(f"Successfully cancelled inventory reservation for product {prod_id}")
+                            await self.product_client.cancel_inventory_reservation(prod_id, qty)
                         except Exception as e:
-                            logger.error(f"Failed to cancel inventory reservation for product {prod_id}: {str(e)}")
+                            logger.error("Failed to cancel inventory reservation", extra={
+                                "product_id": prod_id,
+                                "quantity": qty,
+                                "error": str(e)
+                            })
                 raise
             except Exception as e:
-                logger.error(f"Failed to create order for user {order_data.user_id}: {str(e)}", exc_info=True)
+                logger.error("Failed to create order", extra={
+                    "user_id": order_data.user_id,
+                    "error": str(e)
+                }, exc_info=True)
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, "FailedToCreateOrder_UnknownError"))
-                # 예약된 재고 롤백
                 if reserved_items:
                     span.add_event("RollingBackReservedInventoryDueToError", {"item_count": len(reserved_items)})
-                    logger.info(f"Rolling back inventory reservations due to error for {len(reserved_items)} items")
                     for prod_id, qty in reserved_items:
                         try:
-                            await self.product_client.cancel_inventory_reservation(prod_id, qty) # 자동 계측
-                            logger.info(f"Successfully cancelled inventory reservation for product {prod_id}")
+                            await self.product_client.cancel_inventory_reservation(prod_id, qty)
                         except Exception as comp_e:
-                            logger.error(f"Failed to compensate inventory for product {prod_id}: {comp_e}", exc_info=True)
-                            # 보상 실패는 별도 로깅 또는 알림 처리
+                            logger.error("Failed to compensate inventory", extra={
+                                "product_id": prod_id,
+                                "quantity": qty,
+                                "error": str(comp_e)
+                            })
                             span.add_event("InventoryCompensationFailed", {"product_id": prod_id, "error": str(comp_e)})
                 raise HTTPException(status_code=500, detail=f"Failed to create order: {str(e)}")
 

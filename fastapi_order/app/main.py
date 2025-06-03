@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from sqlalchemy import text # MetaData, select는 현재 main.py에서 직접 사용 안됨
 from app.services.order_manager import OrderManager
 import os
+from app.core.logging_config import setup_logging
 
 # OrderManager에서 사용하는 모델들이므로 여기에 있을 필요는 없지만, 테이블 생성 로직에 필요
 from app.models.order import Order, OrderItem, OrderStatus
@@ -20,9 +21,8 @@ from app.models.outbox import Outbox
 
 from fastapi.responses import JSONResponse
 
-# 로깅 설정 (애플리케이션 진입점에서 한 번 설정하는 것이 좋습니다)
-# logging.basicConfig(level=logging.INFO) # 이미 설정되어 있다면 중복 호출 방지
-logger = logging.getLogger(__name__)
+# 로깅 설정 초기화
+logger = setup_logging()
 
 # uvicorn access 로그만 WARNING 레벨로 설정
 uvicorn_access_logger = logging.getLogger("uvicorn.access")

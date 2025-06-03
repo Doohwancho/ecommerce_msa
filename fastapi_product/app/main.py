@@ -16,7 +16,7 @@ from opentelemetry.semconv.trace import SpanAttributes # For semantic convention
 from app.grpc.product_server import serve as grpc_serve
 
 # import configs
-from app.config.logging import logger # Your custom logger
+from app.config.logging import setup_logging # Import setup_logging
 from app.config.database import (
     Base, write_engine, read_engine, get_mysql_db,
     get_write_product_collection, get_read_product_collection
@@ -25,11 +25,10 @@ from app.config.elasticsearch import elasticsearch_config
 from app.config.otel import setup_telemetry
 from fastapi.responses import JSONResponse
 
-import logging 
+import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Configure logging using the new setup function
+logger = setup_logging() # Use the logger returned by setup_logging
 
 # uvicorn access 로그만 WARNING 레벨로 설정
 uvicorn_access_logger = logging.getLogger("uvicorn.access")
@@ -59,7 +58,7 @@ async def safe_create_tables_if_not_exist(conn, db_type: str): # Added db_type f
             span.set_attribute(SpanAttributes.DB_OPERATION, "SHOW TABLES")
             result = await conn.execute(text("SHOW TABLES"))
             existing_tables = [row[0] for row in result]
-            logger.info(f"[{db_type}] Existing tables: {existing_tables}")
+            logger.info(f"Existing tables in {db_type}", extra={"db_type": db_type, "existing_tables": existing_tables})
             span.set_attribute("db.tables.existing_count", len(existing_tables))
 
             span.set_attribute(SpanAttributes.DB_OPERATION, "Base.metadata.create_all")
@@ -67,15 +66,15 @@ async def safe_create_tables_if_not_exist(conn, db_type: str): # Added db_type f
                 sync_conn,
                 checkfirst=True
             ))
-            logger.info(f"[{db_type}] Tables created or already exist (checkfirst=True)")
+            logger.info(f"Tables created or already exist in {db_type}", extra={"db_type": db_type, "checkfirst": True})
 
             result_after = await conn.execute(text("SHOW TABLES"))
             tables_after = [row[0] for row in result_after]
-            logger.info(f"[{db_type}] Tables after creation attempt: {tables_after}")
+            logger.info(f"Tables after creation attempt in {db_type}", extra={"db_type": db_type, "tables_after": tables_after})
             span.set_attribute("db.tables.after_creation_count", len(tables_after))
             span.set_status(Status(StatusCode.OK))
         except Exception as e:
-            logger.error(f"[{db_type}] Error in safe_create_tables_if_not_exist: {e}", exc_info=True)
+            logger.error(f"Error in safe_create_tables_if_not_exist for {db_type}", extra={"db_type": db_type, "error": str(e)}, exc_info=True)
             span.record_exception(e)
             span.set_status(Status(StatusCode.ERROR, str(e)))
             raise
@@ -97,7 +96,7 @@ async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoi
                         await safe_create_tables_if_not_exist(conn, "read_db")
                     db_setup_span.set_status(Status(StatusCode.OK))
                 except Exception as e:
-                    logger.error(f"Lifespan: DB setup failed: {e}", exc_info=True)
+                    logger.error("Lifespan: DB setup failed", extra={"error": str(e)}, exc_info=True)
                     db_setup_span.record_exception(e)
                     db_setup_span.set_status(Status(StatusCode.ERROR, "DB setup failed"))
                     # Depending on policy, you might raise e here to fail startup
@@ -110,7 +109,7 @@ async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoi
                     logger.info("Elasticsearch initialized")
                     es_init_span.set_status(Status(StatusCode.OK))
                 except Exception as e:
-                    logger.error(f"Failed to initialize Elasticsearch: {e}", exc_info=True)
+                    logger.error("Failed to initialize Elasticsearch", extra={"error": str(e)}, exc_info=True)
                     es_init_span.record_exception(e)
                     es_init_span.set_status(Status(StatusCode.ERROR, "Elasticsearch init failed"))
                     logger.warning("Continuing without Elasticsearch support")
@@ -120,7 +119,7 @@ async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoi
             with tracer.start_as_current_span("app.lifespan.startup.grpc_init") as grpc_init_span:
                 grpc_task = asyncio.create_task(grpc_serve())
                 set_grpc_task(grpc_task)
-                logger.info("gRPC server startup task created on port 50051") # Assuming port 50051
+                logger.info("gRPC server startup task created", extra={"port": 50051})
                 grpc_init_span.set_status(Status(StatusCode.OK))
 
             # 4. Kafka 초기화
@@ -132,10 +131,10 @@ async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoi
                     kafka_init_span.set_attribute("kafka.bootstrap_servers", bootstrap_servers)
                     kafka_init_span.set_attribute("kafka.group_id", group_id)
                     await product_manager.initialize_kafka(bootstrap_servers, group_id)
-                    logger.info("Kafka consumer initialized")
+                    logger.info("Kafka consumer initialized", extra={"bootstrap_servers": bootstrap_servers, "group_id": group_id})
                     kafka_init_span.set_status(Status(StatusCode.OK))
                 except Exception as e:
-                    logger.error(f"Lifespan: Kafka consumer initialization failed: {e}", exc_info=True)
+                    logger.error("Lifespan: Kafka consumer initialization failed", extra={"error": str(e)}, exc_info=True)
                     kafka_init_span.record_exception(e)
                     kafka_init_span.set_status(Status(StatusCode.ERROR, "Kafka init failed"))
                     # Decide if Kafka init failure is critical for startup
@@ -144,7 +143,7 @@ async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoi
             logger.info("Application startup sequence completed.")
 
         except Exception as e: # Catch any unhandled errors during critical startup phases
-            logger.error(f"Critical error during application startup: {e}", exc_info=True)
+            logger.error("Critical error during application startup", extra={"error": str(e)}, exc_info=True)
             startup_span.record_exception(e)
             startup_span.set_status(Status(StatusCode.ERROR, "Critical startup failure"))
             raise # Re-raise to stop application if startup is entirely compromised
@@ -168,7 +167,7 @@ async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoi
                         logger.info("Elasticsearch connection closed")
                         es_close_span.set_status(Status(StatusCode.OK))
                     except Exception as e:
-                        logger.error(f"Error closing Elasticsearch connection: {e}", exc_info=True)
+                        logger.error("Error closing Elasticsearch connection", extra={"error": str(e)}, exc_info=True)
                         es_close_span.record_exception(e)
                         es_close_span.set_status(Status(StatusCode.ERROR, str(e)))
                 
@@ -183,7 +182,7 @@ async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoi
                         except asyncio.CancelledError:
                             logger.info("gRPC server stopped after cancellation")
                         except Exception as e: # Catch other potential errors during await
-                            logger.error(f"Error during gRPC server shutdown: {e}", exc_info=True)
+                            logger.error("Error during gRPC server shutdown", extra={"error": str(e)}, exc_info=True)
                             grpc_stop_span.record_exception(e)
                             grpc_stop_span.set_status(Status(StatusCode.ERROR, "gRPC shutdown error"))
                             raise # Or handle as non-critical
@@ -193,7 +192,7 @@ async def lifespan(app_instance: FastAPI): # Renamed app to app_instance to avoi
                 shutdown_span.set_status(Status(StatusCode.OK))
                 logger.info("Application shutdown sequence completed.")
             except Exception as e:
-                logger.error(f"Error during application shutdown: {e}", exc_info=True)
+                logger.error("Error during application shutdown", extra={"error": str(e)}, exc_info=True)
                 shutdown_span.record_exception(e)
                 shutdown_span.set_status(Status(StatusCode.ERROR, "Shutdown sequence error"))
 
@@ -246,7 +245,7 @@ async def readiness():
                 await db_session.execute(text("SELECT 1"))
             service_status_details["mysql"] = "connected"
         except Exception as e:
-            logger.error(f"Readiness: MySQL connection failed: {str(e)}", exc_info=True)
+            logger.error("Readiness: MySQL connection failed", extra={"error": str(e)}, exc_info=True)
             errors.append(f"MySQL: {str(e)}")
             service_status_details["mysql"] = "failed"
             readiness_span.set_attribute("readiness.mysql.error", str(e))
@@ -274,7 +273,7 @@ async def readiness():
                 readiness_span.set_attribute("readiness.mongodb_read.error", "Failed to get collection")
                 all_ok = False
         except Exception as e:
-            logger.error(f"Readiness: MongoDB connection check failed: {str(e)}", exc_info=True)
+            logger.error("Readiness: MongoDB connection check failed", extra={"error": str(e)}, exc_info=True)
             errors.append(f"MongoDB: {str(e)}")
             service_status_details["mongodb_write"] = service_status_details.get("mongodb_write", "failed")
             service_status_details["mongodb_read"] = service_status_details.get("mongodb_read", "failed")
@@ -305,7 +304,7 @@ async def readiness():
             else:
                 service_status_details["grpc"] = "running"
         except Exception as e: # Should be unlikely if get_grpc_task is simple
-            logger.error(f"Readiness: gRPC check logic failed: {str(e)}", exc_info=True)
+            logger.error("Readiness: gRPC check logic failed", extra={"error": str(e)}, exc_info=True)
             errors.append(f"gRPC check error: {str(e)}")
             service_status_details["grpc"] = "error"
             readiness_span.set_attribute("readiness.grpc.check_error", str(e))
@@ -343,7 +342,7 @@ async def test_connections():
                 await db_session.execute(text("SELECT 1"))
             results["mysql"] = {"status": "connected"}
         except Exception as e:
-            logger.error(f"TestConnections: MySQL failed: {e}", exc_info=True)
+            logger.error("TestConnections: MySQL failed", extra={"error": str(e)}, exc_info=True)
             results["mysql"] = {"status": "error", "detail": str(e)}
             span.set_attribute("test.mysql.error", str(e))
             any_error = True
@@ -370,7 +369,7 @@ async def test_connections():
                 span.set_attribute("test.mongodb_read.error", "Failed to get read collection")
                 any_error = True
         except Exception as e:
-            logger.error(f"TestConnections: MongoDB failed: {e}", exc_info=True)
+            logger.error("TestConnections: MongoDB failed", extra={"error": str(e)}, exc_info=True)
             results["mongodb_overall"] = {"status": "error", "detail": str(e)} # More specific if possible
             span.set_attribute("test.mongodb.error", str(e))
             any_error = True
@@ -381,7 +380,7 @@ async def test_connections():
             info = await es_client.info() # Traced by ElasticsearchInstrumentor
             results["elasticsearch"] = {"status": "connected", "version": info.get("version", {}).get("number", "unknown")}
         except Exception as e:
-            logger.error(f"TestConnections: Elasticsearch failed: {e}", exc_info=True)
+            logger.error("TestConnections: Elasticsearch failed", extra={"error": str(e)}, exc_info=True)
             results["elasticsearch"] = {"status": "error", "detail": str(e)}
             span.set_attribute("test.elasticsearch.error", str(e))
             any_error = True

@@ -113,7 +113,7 @@ class ProductClient:
                 await self._ensure_channel()
                 if not self.stub: raise ConnectionError("ProductService stub not available for get_product.")
                 
-                request = product_pb2.GetProductRequest(product_id=product_id) # 요청 객체 이름 확인
+                request = product_pb2.ProductRequest(product_id=product_id) # 요청 객체 이름 확인
                 logger.info(f"ProductClient: Calling GetProduct for product_id: {product_id}")
                 # GrpcInstrumentorClient가 이 stub 호출을 자동으로 계측하여 CLIENT 스팬을 생성
                 response = await self.stub.GetProduct(request, timeout=self.default_timeout)

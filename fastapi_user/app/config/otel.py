@@ -83,9 +83,8 @@ def setup_telemetry():
         set_logger_provider(logger_provider)
 
         # OpenTelemetry 로깅 계측 활성화
-        # 0.42b0 버전에서는 LoggingInstrumentor().instrument() 방식 사용 추정
         # 이 부분이 표준 logging 라이브러리를 후킹하여 로그 레코드에 트레이스 컨텍스트(Trace ID/Span ID)를 추가하고 OTel 파이프라인으로 보냅니다.
-        LoggingInstrumentor().instrument() # <-- 임포트 이름과 초기화 방식 수정
+        LoggingInstrumentor().instrument(log_level=logging.INFO) # Ensure log_level is set for the instrumentor
 
 
         # --- 라이브러리 인스트루멘테이션 설정 ---

@@ -1,6 +1,5 @@
 from concurrent import futures
 import grpc
-import logging # Standard Python logging
 from app.services.product_service import ProductService # Assuming this is your business logic
 import product_pb2
 import product_pb2_grpc
@@ -9,8 +8,10 @@ from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 from opentelemetry.semconv.trace import SpanAttributes # For RPC semantic conventions
 
+import logging
+
 # Initialize a logger for this module
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # Replaced with import from app.config.logging
 
 class ProductServiceServicer(product_pb2_grpc.ProductServiceServicer):
     def __init__(self, product_service: ProductService):
@@ -36,8 +37,7 @@ class ProductServiceServicer(product_pb2_grpc.ProductServiceServicer):
                     error_detail = f"Product {request.product_id} not found"
                     span.set_attribute("app.error.type", "not_found")
                     span.set_status(Status(StatusCode.ERROR, description=error_detail))
-                    # Log the event
-                    logger.warning(f"GetProduct: {error_detail}")
+                    logger.warning("Product not found in GetProduct.", extra={"product_id": request.product_id})
                     context.set_code(grpc.StatusCode.NOT_FOUND)
                     context.set_details(error_detail)
                     return product_pb2.ProductResponse() # Return empty response as per gRPC spec for NOT_FOUND
@@ -47,7 +47,7 @@ class ProductServiceServicer(product_pb2_grpc.ProductServiceServicer):
                 span.set_attribute("app.response.product.price", product.price.amount) # Assuming product.price is an object
                 span.set_status(Status(StatusCode.OK))
                 
-                logger.info(f"GetProduct: Successfully retrieved product '{request.product_id}'.")
+                logger.info("Successfully retrieved product in GetProduct.", extra={"product_id": request.product_id, "product_title": product.title})
                 return product_pb2.ProductResponse(
                     product_id=product.product_id,
                     title=product.title,
@@ -55,7 +55,9 @@ class ProductServiceServicer(product_pb2_grpc.ProductServiceServicer):
                 )
             except Exception as e:
                 error_msg = f"Unhandled error in GetProduct for ID '{request.product_id}': {str(e)}"
-                logger.error(error_msg, exc_info=True) # Log with stack trace
+                logger.error("Unhandled error in GetProduct.", 
+                             extra={"product_id": request.product_id, "error": str(e)}, 
+                             exc_info=True)
                 span.record_exception(e) # Record exception on the span
                 span.set_status(Status(StatusCode.ERROR, description=error_msg))
                 
@@ -73,22 +75,27 @@ class ProductServiceServicer(product_pb2_grpc.ProductServiceServicer):
             span.set_attribute("app.request.quantity", request.quantity)
             
             try:
-                available = await self.product_service.check_availability(
+                # The check_availability method in ProductService now returns a tuple: (bool, Optional[ProductResponse])
+                # We are interested in the boolean part here.
+                is_available, _ = await self.product_service.check_availability(
                     request.product_id,
                     request.quantity
                 )
                 
-                span.set_attribute("app.response.available", available)
+                span.set_attribute("app.response.available", is_available)
                 span.set_status(Status(StatusCode.OK))
                 
-                logger.info(f"CheckProductAvailability for '{request.product_id}', qty {request.quantity}: {available}")
+                logger.info("Checked product availability.", 
+                            extra={"product_id": request.product_id, "quantity": request.quantity, "available": is_available})
                 return product_pb2.ProductAvailabilityResponse(
-                    available=available,
-                    message="Product is available" if available else "Product is not available"
+                    available=is_available,
+                    message="Product is available" if is_available else "Product is not available"
                 )
             except Exception as e:
                 error_msg = f"Error in CheckProductAvailability for ID '{request.product_id}': {str(e)}"
-                logger.error(error_msg, exc_info=True)
+                logger.error("Error in CheckProductAvailability.", 
+                             extra={"product_id": request.product_id, "quantity": request.quantity, "error": str(e)}, 
+                             exc_info=True)
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, description=error_msg))
                 
@@ -119,7 +126,8 @@ class ProductServiceServicer(product_pb2_grpc.ProductServiceServicer):
                 
                 if success:
                     span.set_status(Status(StatusCode.OK))
-                    logger.info(f"CheckAndReserveInventory for '{request.product_id}', qty {request.quantity}: SUCCESS - {message}")
+                    logger.info("CheckAndReserveInventory: SUCCESS.", 
+                                extra={"product_id": request.product_id, "quantity": request.quantity, "response_detail": message})
                 else:
                     # If not successful due to business logic (e.g., out of stock), it's not necessarily a span ERROR.
                     # The gRPC status code might be FAILED_PRECONDITION or ABORTED.
@@ -128,7 +136,8 @@ class ProductServiceServicer(product_pb2_grpc.ProductServiceServicer):
                     # Let's assume for now that a 'false' success is a valid business outcome handled by the message.
                     # If it should be an error, change span status and log level.
                     span.set_status(Status(StatusCode.OK, description=f"Reservation attempt completed: {message}")) # Or ERROR if 'false' is an error.
-                    logger.warning(f"CheckAndReserveInventory for '{request.product_id}', qty {request.quantity}: FAILED - {message}")
+                    logger.warning("CheckAndReserveInventory: FAILED.", 
+                                   extra={"product_id": request.product_id, "quantity": request.quantity, "response_detail": message})
                     # Potentially set a different gRPC status code if not 'success'
                     if "not available" in message.lower() or "insufficient" in message.lower():
                          context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
@@ -137,7 +146,9 @@ class ProductServiceServicer(product_pb2_grpc.ProductServiceServicer):
                 return product_pb2.InventoryResponse(success=success, message=message)
             except Exception as e:
                 error_msg = f"Error in CheckAndReserveInventory for ID '{request.product_id}': {str(e)}"
-                logger.error(error_msg, exc_info=True)
+                logger.error("Error in CheckAndReserveInventory.", 
+                             extra={"product_id": request.product_id, "quantity": request.quantity, "error": str(e)}, 
+                             exc_info=True)
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, description=error_msg))
                 
@@ -168,17 +179,21 @@ class ProductServiceServicer(product_pb2_grpc.ProductServiceServicer):
 
                 if success:
                     span.set_status(Status(StatusCode.OK))
-                    logger.info(f"ReserveInventory for '{request.product_id}', qty {request.quantity}: SUCCESS")
+                    logger.info("ReserveInventory: SUCCESS.", 
+                                extra={"product_id": request.product_id, "quantity": request.quantity})
                 else:
                     span.set_status(Status(StatusCode.OK, description=message)) # Or ERROR
-                    logger.warning(f"ReserveInventory for '{request.product_id}', qty {request.quantity}: FAILED - {message}")
+                    logger.warning("ReserveInventory: FAILED.", 
+                                   extra={"product_id": request.product_id, "quantity": request.quantity, "response_detail": message})
                     context.set_code(grpc.StatusCode.FAILED_PRECONDITION) # Example
                     context.set_details(message)
 
                 return product_pb2.InventoryResponse(success=success, message=message)
             except Exception as e:
                 error_msg = f"Error in ReserveInventory for ID '{request.product_id}': {str(e)}"
-                logger.error(error_msg, exc_info=True)
+                logger.error("Error in ReserveInventory.", 
+                             extra={"product_id": request.product_id, "quantity": request.quantity, "error": str(e)}, 
+                             exc_info=True)
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, description=error_msg))
                 context.set_code(grpc.StatusCode.INTERNAL)
@@ -201,7 +216,8 @@ class ProductServiceServicer(product_pb2_grpc.ProductServiceServicer):
                     error_detail = f"Product inventory for {request.product_id} not found"
                     span.set_attribute("app.error.type", "not_found")
                     span.set_status(Status(StatusCode.ERROR, description=error_detail))
-                    logger.warning(f"GetProductInventory: {error_detail}")
+                    logger.warning("Product inventory not found in GetProductInventory.", 
+                                   extra={"product_id": request.product_id})
                     context.set_code(grpc.StatusCode.NOT_FOUND)
                     context.set_details(error_detail)
                     return product_pb2.ProductInventoryResponse()
@@ -211,7 +227,8 @@ class ProductServiceServicer(product_pb2_grpc.ProductServiceServicer):
                 span.set_attribute("app.response.inventory.available_stock", inventory.available_stock)
                 span.set_status(Status(StatusCode.OK))
                 
-                logger.info(f"GetProductInventory: Successfully retrieved inventory for product '{request.product_id}'.")
+                logger.info("Successfully retrieved inventory for product.", 
+                            extra={"product_id": request.product_id, "stock": inventory.stock, "available_stock": inventory.available_stock})
                 return product_pb2.ProductInventoryResponse(
                     product_id=inventory.product_id,
                     stock=inventory.stock,
@@ -220,7 +237,9 @@ class ProductServiceServicer(product_pb2_grpc.ProductServiceServicer):
                 )
             except Exception as e:
                 error_msg = f"Error in GetProductInventory for ID '{request.product_id}': {str(e)}"
-                logger.error(error_msg, exc_info=True)
+                logger.error("Error in GetProductInventory.", 
+                             extra={"product_id": request.product_id, "error": str(e)}, 
+                             exc_info=True)
                 span.record_exception(e)
                 span.set_status(Status(StatusCode.ERROR, description=error_msg))
                 
@@ -251,12 +270,12 @@ async def serve():
     
     listen_addr = '[::]:50051'
     server.add_insecure_port(listen_addr)
-    logger.info(f"gRPC ProductService starting on {listen_addr}")
+    logger.info("gRPC ProductService starting.", extra={"listen_addr": listen_addr})
     await server.start()
     
     try:
         await server.wait_for_termination()
     except KeyboardInterrupt:
-        logger.info("gRPC ProductService stopping...")
+        logger.info("gRPC ProductService stopping via KeyboardInterrupt.")
         await server.stop(0) # Graceful stop
     logger.info("gRPC ProductService stopped.")

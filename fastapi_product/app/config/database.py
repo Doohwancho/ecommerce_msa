@@ -23,13 +23,13 @@ MYSQL_ROUTER_HOST = os.getenv('MYSQL_ROUTER_HOST', 'mycluster')
 MYSQL_ROUTER_RW_PORT = os.getenv('MYSQL_ROUTER_RW_PORT', '6446')
 MYSQL_ROUTER_RO_PORT = os.getenv('MYSQL_ROUTER_RO_PORT', '6447')
 
-MYSQL_PORT = os.getenv('MYSQL_PORT', '3306')
 MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "product_category")
 # before replica set
 # SQLALCHEMY_DATABASE_URL = f"mysql+aiomysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}/{MYSQL_DATABASE}?charset=utf8mb4"
 # after replica set
 # 쓰기 작업용 엔진 (Primary)
 PRIMARY_URL = f"mysql+aiomysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_ROUTER_HOST}:{MYSQL_ROUTER_RW_PORT}/{MYSQL_DATABASE}"
+logger.info("MySQL Primary URL configured.", extra={"url_type": "primary", "host": MYSQL_ROUTER_HOST, "port": MYSQL_ROUTER_RW_PORT, "database": MYSQL_DATABASE})
 write_engine = create_async_engine(
     PRIMARY_URL,
     pool_pre_ping=True,
@@ -39,6 +39,7 @@ write_engine = create_async_engine(
 
 # 읽기 작업용 엔진 (Secondary)
 SECONDARY_URL = f"mysql+aiomysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_ROUTER_HOST}:{MYSQL_ROUTER_RO_PORT}/{MYSQL_DATABASE}"
+logger.info("MySQL Secondary URL configured.", extra={"url_type": "secondary", "host": MYSQL_ROUTER_HOST, "port": MYSQL_ROUTER_RO_PORT, "database": MYSQL_DATABASE})
 read_engine = create_async_engine(
     SECONDARY_URL,
     pool_pre_ping=True,
@@ -57,6 +58,7 @@ WriteSessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False
 )
+logger.info("MySQL WriteSessionLocal created.")
 
 ReadSessionLocal = sessionmaker(
     bind=read_engine,
@@ -65,6 +67,7 @@ ReadSessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False
 )
+logger.info("MySQL ReadSessionLocal created.")
 
 # 기존 호환성을 위한 기본 세션(쓰기 세션으로 설정)
 AsyncSessionLocal = WriteSessionLocal
@@ -77,6 +80,9 @@ async def get_write_db():
     async with WriteSessionLocal() as session:
         try:
             yield session
+        except Exception as e:
+            logger.error("Error in get_write_db session context.", extra={"error": str(e)}, exc_info=True)
+            raise
         finally:
             await session.close()
 
@@ -85,6 +91,9 @@ async def get_read_db():
     async with ReadSessionLocal() as session:
         try:
             yield session
+        except Exception as e:
+            logger.error("Error in get_read_db session context.", extra={"error": str(e)}, exc_info=True)
+            raise
         finally:
             await session.close()
 
@@ -94,6 +103,9 @@ async def get_async_mysql_db() -> AsyncSession:
     async with WriteSessionLocal() as session:
         try:
             yield session
+        except Exception as e:
+            logger.error("Error in get_async_mysql_db session context.", extra={"error": str(e)}, exc_info=True)
+            raise
         finally:
             await session.close()
 
@@ -134,8 +146,13 @@ def get_write_mongo_client():
     
     if _write_mongo_client is None:
         connection_string = f"mongodb://{MONGODB_USERNAME}:{MONGODB_PASSWORD}@{MONGODB_HOST}/my_db?replicaSet={MONGODB_REPLICA_SET}&authSource={MONGODB_AUTH_SOURCE}&readPreference=primary"
-        _write_mongo_client = AsyncIOMotorClient(connection_string)
-        logger.info("MongoDB write client initialized")
+        try:
+            _write_mongo_client = AsyncIOMotorClient(connection_string)
+            logger.info("MongoDB write client initialized.", extra={"hosts": MONGODB_HOST, "replica_set": MONGODB_REPLICA_SET, "read_preference": "primary"})
+        except Exception as e:
+            logger.error("Failed to initialize MongoDB write client.", 
+                         extra={"connection_string_partial_host": MONGODB_HOST, "error": str(e)}, exc_info=True)
+            raise # Re-raise after logging
     
     return _write_mongo_client
 
@@ -147,8 +164,13 @@ def get_read_mongo_client():
     
     if _read_mongo_client is None:
         connection_string = f"mongodb://{MONGODB_USERNAME}:{MONGODB_PASSWORD}@{MONGODB_HOST}/my_db?replicaSet={MONGODB_REPLICA_SET}&authSource={MONGODB_AUTH_SOURCE}&readPreference=secondary"
-        _read_mongo_client = AsyncIOMotorClient(connection_string)
-        logger.info("MongoDB read client initialized")
+        try:
+            _read_mongo_client = AsyncIOMotorClient(connection_string)
+            logger.info("MongoDB read client initialized.", extra={"hosts": MONGODB_HOST, "replica_set": MONGODB_REPLICA_SET, "read_preference": "secondary"})
+        except Exception as e:
+            logger.error("Failed to initialize MongoDB read client.", 
+                         extra={"connection_string_partial_host": MONGODB_HOST, "error": str(e)}, exc_info=True)
+            raise # Re-raise after logging
     
     return _read_mongo_client
 
@@ -165,13 +187,14 @@ async def get_write_product_collection() -> AgnosticCollection:
         collection_names = await mongo_db.list_collection_names()
         if "products" not in collection_names:
             await mongo_db.create_collection("products")
-            logger.info("Created products collection")
+            logger.info("Created MongoDB 'products' collection for write operations.")
         
         product_collection = mongo_db.products
-        logger.info("MongoDB write connection successful and collection verified")
+        # Consider a lightweight ping or server_info call if connection verification is critical here
+        # logger.info("MongoDB write connection successful and collection verified.") # This might be too verbose
         return product_collection
     except Exception as e:
-        logger.error(f"MongoDB write connection error: {e}")
+        logger.error("Error getting MongoDB write product collection.", extra={"error": str(e)}, exc_info=True)
         return None
 
 async def get_read_product_collection() -> AgnosticCollection:
@@ -182,8 +205,8 @@ async def get_read_product_collection() -> AgnosticCollection:
         mongo_client = get_read_mongo_client()
         mongo_db = mongo_client.my_db
         product_collection = mongo_db.products
-        logger.info("MongoDB read connection successful")
+        # logger.info("MongoDB read connection successful.") # Potentially verbose
         return product_collection
     except Exception as e:
-        logger.error(f"MongoDB read connection error: {e}")
+        logger.error("Error getting MongoDB read product collection.", extra={"error": str(e)}, exc_info=True)
         return None

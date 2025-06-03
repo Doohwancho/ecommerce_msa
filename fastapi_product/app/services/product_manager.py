@@ -10,7 +10,6 @@ from typing import Callable, Dict # Optional 제거 (사용 안 됨)
 
 from app.config.database import WriteSessionLocal # SQLAlchemyInstrumentor가 DB 세션 자동 계측
 from app.config.kafka_consumer import ProductModuleKafkaConsumer # 수정된 컨슈머 클래스 임포트
-# from app.config.logging import logger # 중앙 로깅 설정 사용 시
 from app.models.outbox import Outbox
 from app.services.product_service import ProductService
 
@@ -18,8 +17,9 @@ from app.services.product_service import ProductService
 from opentelemetry import propagate, trace
 from opentelemetry.semconv.trace import SpanAttributes
 from opentelemetry.trace import SpanKind, Status, StatusCode
+import logging
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) 
 
 
 class ProductManager:
@@ -61,31 +61,46 @@ class ProductManager:
                 )
                 
                 await self.kafka_consumer.start()
-                logger.info(f"ProductManager: Kafka consumer initialized for group '{group_id}', topics '{subscribed_topics}'.")
+                logger.info("ProductManager: Kafka consumer initialized.", extra={
+                    "group_id": group_id,
+                    "topics": subscribed_topics
+                })
                 span.set_status(Status(StatusCode.OK))
             except Exception as e:
-                logger.error(f"ProductManager: Failed to initialize Kafka consumer: {e}", exc_info=True)
+                logger.error("ProductManager: Failed to initialize Kafka consumer", extra={"error": str(e)}, exc_info=True)
                 if span.is_recording():
                     span.record_exception(e)
                     span.set_status(Status(StatusCode.ERROR, "Kafka init failed in ProductManager"))
                 raise
     
 
-    async def _process_event_with_retries(self, event_name: str, event_data: dict, handler_logic_method: Callable, compensation_method: Callable | None = None):
-        # 이 스팬은 ProductModuleKafkaConsumer._consume_loop에서
-        # AIOKafkaInstrumentor가 만든 부모 CONSUMER 스팬의 자식으로 자동 생성됨.
-        # tracer = trace.get_tracer(__name__) # 필요 시 함수 내에서 다시 얻기
-        with self.tracer.start_as_current_span(
-            f"ProductManager.process.{event_name}", kind=SpanKind.INTERNAL
-        ) as span:
-            order_id = event_data.get("order_id", "unknown_order")
-            span.set_attribute("app.event.name_handled", event_name)
-            span.set_attribute("app.order_id", str(order_id))
-            try:
-                span.set_attribute("app.event.data_preview", json.dumps(event_data, ensure_ascii=False)[:256])
-            except:
-                span.set_attribute("app.event.data_preview", str(event_data)[:256])
+    async def _process_event_with_retries(
+        self,
+        event_name: str,
+        event_data: dict,
+        handler_logic_method: Callable,
+        parent_context=None, 
+        message_attributes: Dict = None, 
+        compensation_method: Callable | None = None
+    ):
+        span_name = f"{message_attributes.get(SpanAttributes.MESSAGING_DESTINATION_NAME, 'unknown_topic')} {message_attributes.get('app.event_type', event_name)} process"
+        
+        current_order_id = str(event_data.get("order_id", "unknown_order"))
+        attributes_for_span = {
+            "app.event.name_handled": event_name,
+            "app.order_id": current_order_id,
+        }
+        if message_attributes:
+            attributes_for_span.update(message_attributes)
 
+        with self.tracer.start_as_current_span(
+            name=span_name,
+            context=parent_context, 
+            kind=SpanKind.CONSUMER, 
+            attributes=attributes_for_span 
+        ) as span:
+            # Payload preview should be in message_attributes if available from consumer
+            # No need to add it again here unless enhancing.
 
             retry_count = 0
             last_exception = None
@@ -93,19 +108,28 @@ class ProductManager:
                 current_attempt = retry_count + 1
                 span.set_attribute("app.retry.attempt", current_attempt)
                 try:
-                    logger.info(
-                        f"Processing '{event_name}' for order '{order_id}', attempt {current_attempt}/{self.max_retries + 1}."
-                    )
-                    # 핸들러 로직 호출 (이 안에서도 자체적인 자식 스팬 생성 가능)
-                    await handler_logic_method(event_data) # parent_span 인자 제거
+                    logger.info("Processing event", extra={
+                        "event_name": event_name,
+                        "order_id": current_order_id, # Use local var
+                        "attempt": current_attempt,
+                        "max_attempts": self.max_retries + 1
+                    })
+                    await handler_logic_method(event_data) 
                     span.set_status(Status(StatusCode.OK))
-                    logger.info(
-                        f"Successfully processed '{event_name}' for order '{order_id}' on attempt {current_attempt}."
-                    )
-                    return  # 성공 시 루프 종료
-                except ValueError as ve:  # 데이터 유효성 검사 에러 (재시도 무의미)
-                    error_msg = f"Data error processing '{event_name}' for order '{order_id}' (attempt {current_attempt}): {ve}"
-                    logger.error(error_msg, exc_info=True)
+                    logger.info("Successfully processed event", extra={
+                        "event_name": event_name,
+                        "order_id": current_order_id, # Use local var
+                        "attempt": current_attempt
+                    })
+                    return
+                except ValueError as ve:
+                    error_msg = f"Data error processing event: {ve}"
+                    logger.error(error_msg, extra={
+                        "event_name": event_name,
+                        "order_id": current_order_id, # Use local var
+                        "attempt": current_attempt,
+                        "error": str(ve)
+                    }, exc_info=True)
                     if span.is_recording():
                         span.record_exception(ve)
                         span.set_status(Status(StatusCode.ERROR, error_msg))
@@ -113,15 +137,21 @@ class ProductManager:
                     if compensation_method:
                         await compensation_method(
                             event_data,
-                            failure_type=f"{event_name}_data_validation_failed", # 명확한 실패 타입
+                            failure_type=f"{event_name}_data_validation_failed",
                             reason=f"Data error: {ve}"
                         )
-                    return  # 재시도 없이 종료
-                except Exception as e:  # 기타 재시도 가능한 에러
+                    return
+                except Exception as e:
                     last_exception = e
                     retry_count += 1
-                    error_message = f"Error processing '{event_name}' for order '{order_id}' (attempt {current_attempt} failed, next: {retry_count +1 if retry_count <= self.max_retries else 'max_retries_exceeded'}): {e}"
-                    logger.error(error_message, exc_info=True)
+                    error_message = f"Error processing event (attempt {current_attempt} failed)"
+                    logger.error(error_message, extra={
+                        "event_name": event_name,
+                        "order_id": current_order_id, # Use local var
+                        "attempt_failed": current_attempt,
+                        "next_attempt": retry_count +1 if retry_count <= self.max_retries else "max_retries_exceeded",
+                        "error": str(e)
+                    }, exc_info=True)
                     if span.is_recording():
                         span.record_exception(e)
                         span.add_event(
@@ -133,201 +163,352 @@ class ProductManager:
                         )
 
                     if retry_count > self.max_retries:
-                        final_error_msg = f"CRITICAL: Failed to process '{event_name}' for order '{order_id}' after {self.max_retries + 1} attempts. Last error: {last_exception}"
-                        logger.critical(final_error_msg)
+                        final_error_msg = f"CRITICAL: Failed to process event after {self.max_retries + 1} attempts."
+                        logger.critical(final_error_msg, extra={
+                            "event_name": event_name,
+                            "order_id": current_order_id, # Use local var
+                            "attempts": self.max_retries + 1,
+                            "last_error": str(last_exception)
+                        })
                         if span.is_recording():
                             span.set_status(Status(StatusCode.ERROR, final_error_msg))
                             span.set_attribute("app.error.type", "max_retries_exceeded")
                         if compensation_method:
                             await compensation_method(
                                 event_data,
-                                failure_type=f"{event_name}_max_retries_exceeded", # 명확한 실패 타입
+                                failure_type=f"{event_name}_max_retries_exceeded",
                                 reason=f"Max retries exceeded: {last_exception}"
                             )
-                        return  # 모든 재시도 실패, 루프 종료
+                        return
 
                     sleep_duration = self.retry_delay * (2 ** (retry_count - 1))
-                    logger.info(
-                        f"Retrying '{event_name}' for order '{order_id}' in {sleep_duration}s (attempt {retry_count + 1})..."
-                    )
-                    if span.is_recording(): # 스팬이 살아있을 때만 이벤트 추가
+                    logger.info("Retrying event after delay", extra={
+                        "event_name": event_name,
+                        "order_id": current_order_id, # Use local var
+                        "delay_seconds": sleep_duration,
+                        "next_attempt": retry_count + 1
+                    })
+                    if span.is_recording(): 
                         span.add_event("retrying_handler_after_delay", {"delay_seconds": sleep_duration})
                     await asyncio.sleep(sleep_duration)
 
     async def _handle_order_success_logic(self, event_data: dict):
-        handler_entry_span = trace.get_current_span()
-        if handler_entry_span and handler_entry_span.is_recording():
-            ctx = handler_entry_span.get_span_context()
-            parent_id_str = f"{handler_entry_span.parent.span_id:x}" if handler_entry_span.parent else "None"
-            logger.info(
-                f"ProductManager.handle_order_success: ENTRY - TraceID={ctx.trace_id:x}, "
-                f"SpanID={ctx.span_id:x}, ParentSpanID={parent_id_str}, IsRemote={ctx.is_remote}"
-            )
-            # 여기서 SpanID가 Jaeger UI에서 본 "dbserver.order receive" 스팬의 ID와 일치해야 함!
-            # 그리고 TraceID는 order-service부터 쭉 이어져 온 그 ID여야 하고.
-        else:
-            # !!!!! 이 로그가 찍히면 컨텍스트 전파 실패 !!!!!
-            logger.warning("ProductManager.handle_order_success: !!! No active/recording span at handler entry !!!")
-
-        # 이 메서드는 _process_event_with_retries의 컨텍스트(스팬) 하에서 실행됨
-        # tracer = trace.get_tracer(__name__) # 필요시 여기서 다시 얻기
-        with self.tracer.start_as_current_span(
-            "ProductManager._handle_order_success_logic"
+        # The current span here is a child of the CONSUMER span from _process_event_with_retries.
+        with self.tracer.start_as_current_span( # Simplified span name
+            "ProductManager._handle_order_success_logic" 
         ) as span:
             items = event_data.get("items", [])
             order_id = event_data.get("order_id", "unknown_order_id")
             span.set_attribute("app.order_id", str(order_id))
             span.set_attribute("app.items_count", len(items))
             if not items:
-                logger.warning(f"No items found in 'order_success' event for order {order_id}. Nothing to confirm.")
+                logger.warning("No items found in 'order_success' event. Nothing to confirm.", extra={"order_id": order_id})
                 span.set_status(Status(StatusCode.OK, "No items to confirm"))
-                return # 아이템 없으면 처리할 것 없음 (에러는 아님)
+                return 
 
-            product_service = ProductService()  # ProductService 인스턴스화 (DI 고려)
+            product_service = ProductService()
             for item_idx, item_data in enumerate(items):
-                # 각 아이템 처리를 위한 자식 스팬 생성
-                with self.tracer.start_as_current_span("ProductManager._handle_order_success_logic_details") as span:
+                with self.tracer.start_as_current_span(f"ProductManager._handle_order_success_logic_item_{item_idx}") as item_span:
                     product_id = item_data.get("product_id")
                     quantity = item_data.get("quantity")
                     item_span.set_attribute("app.product_id", str(product_id))
                     item_span.set_attribute("app.quantity", quantity)
 
                     if not product_id or not isinstance(quantity, (int, float)) or quantity <= 0:
-                        logger.warning(f"Invalid item data in order_success: {item_data}. Skipping.")
+                        logger.warning("Invalid item data in order_success. Skipping.", extra={
+                            "order_id": order_id,
+                            "item_data": item_data
+                        })
                         item_span.set_status(Status(StatusCode.ERROR, "Invalid item data for stock confirmation"))
                         continue
 
-                    logger.info(f"Confirming inventory for product {product_id}, quantity {quantity} (Order: {order_id})")
-                    # ProductService.confirm_inventory 내부에서도 자체 스팬 생성 권장
+                    logger.info("Confirming inventory for product", extra={
+                        "product_id": product_id,
+                        "quantity": quantity,
+                        "order_id": order_id
+                    })
                     success = await product_service.confirm_inventory(
                         product_id=str(product_id), quantity=int(quantity)
                     )
                     if success:
-                        logger.info(f"Inventory confirmed for product {product_id}, quantity {quantity}.")
+                        logger.info("Inventory confirmed for product", extra={
+                            "product_id": product_id,
+                            "quantity": quantity
+                        })
                         item_span.set_status(Status(StatusCode.OK))
                     else:
-                        # 이 경우 SAGA 보상 로직이 복잡해질 수 있음 (이미 주문/결제는 성공)
-                        # 데이터 불일치 가능성이므로 심각하게 로깅하고 알림 필요.
-                        logger.error(f"Failed to confirm inventory for product {product_id}, quantity {quantity} for SUCCESSFUL order {order_id}.")
-                        item_span.set_status(Status(StatusCode.ERROR,"Inventory confirmation failed unexpectedly"))
-                        # 여기서 전체 트랜잭션 실패로 간주하고 보상 이벤트를 발행해야 할 수도 있음
+                        logger.error("Failed to confirm inventory for product.", extra={
+                            "product_id": product_id,
+                            "quantity": quantity,
+                            "order_id": order_id
+                        })
+                        item_span.set_status(Status(StatusCode.ERROR, "Inventory confirmation failed"))
+                        # This failure might require a SAGA compensation if critical
+                        # For now, just logging and marking item span as error.
+                        # The overall handler span status will be set at the end of _process_event_with_retries.
 
-    async def handle_order_success(self, event_data: dict):
+    async def handle_order_success(self, event_data: dict, parent_context=None, message_attributes: Dict = None):
         await self._process_event_with_retries(
             event_name="order_success",
             event_data=event_data,
             handler_logic_method=self._handle_order_success_logic,
-            compensation_method=self.create_compensation_event # 예시 보상 핸들러
+            parent_context=parent_context,
+            message_attributes=message_attributes,
+            compensation_method=self.create_compensation_event_for_product_failure 
         )
 
     async def _handle_order_failed_logic(self, event_data: dict):
-        # tracer = trace.get_tracer(__name__)
-        with self.tracer.start_as_current_span(
-            "ProductManager._handle_order_failed_logic"
-        ) as span:
-            items = event_data.get("items", [])
+        with self.tracer.start_as_current_span( # Simplified span name
+            "ProductManager._handle_order_failed_logic" 
+        ) as span: 
             order_id = event_data.get("order_id", "unknown_order_id")
+            reason = event_data.get("reason", event_data.get("error_message", "No reason provided"))
+            items = event_data.get("items", []) 
+
             span.set_attribute("app.order_id", str(order_id))
-            span.set_attribute("app.items_count", len(items))
+            span.set_attribute("app.failure_reason", str(reason))
+            span.set_attribute("app.items_count_at_failure", len(items))
+
+            logger.info("Processing 'order_failed' event: rolling back inventory if necessary.", extra={
+                "order_id": order_id,
+                "reason": reason,
+                "item_count": len(items)
+            })
 
             if not items:
-                logger.warning(f"No items found in 'order_failed' event for order {order_id}. Nothing to release.")
-                span.set_status(Status(StatusCode.OK, "No items to release"))
-                return
+                logger.warning("No items found in 'order_failed' event. Nothing to roll back specifically for items.", extra={"order_id": order_id})
 
             product_service = ProductService()
+            all_rollbacks_successful = True # Track overall rollback success for this handler
             for item_idx, item_data in enumerate(items):
-                with self.tracer.start_as_current_span(
-                    f"release_inventory_item_{item_idx}"
-                ) as item_span:
+                with self.tracer.start_as_current_span(f"ProductManager._handle_order_failed_logic_item_{item_idx}") as item_span:
                     product_id = item_data.get("product_id")
-                    quantity = item_data.get("quantity")
+                    quantity = item_data.get("quantity") 
                     item_span.set_attribute("app.product_id", str(product_id))
-                    item_span.set_attribute("app.quantity", quantity)
+                    item_span.set_attribute("app.quantity_to_rollback", quantity)
 
                     if not product_id or not isinstance(quantity, (int, float)) or quantity <= 0:
-                        logger.warning(f"Invalid item data in order_failed: {item_data}. Skipping release.")
-                        item_span.set_status(Status(StatusCode.ERROR, "Invalid item data for stock release"))
+                        logger.warning("Invalid item data in order_failed for rollback. Skipping.", extra={
+                            "order_id": order_id,
+                            "item_data": item_data
+                        })
+                        item_span.set_status(Status(StatusCode.ERROR, "Invalid item data for inventory rollback"))
+                        all_rollbacks_successful = False # Mark overall as failed if any item fails
                         continue
                     
-                    logger.info(f"Releasing reserved inventory for product {product_id}, quantity {quantity} (Order: {order_id})")
-                    success = await product_service.release_inventory(
+                    logger.info("Rolling back reserved inventory for product", extra={
+                        "product_id": product_id,
+                        "quantity": quantity,
+                        "order_id": order_id
+                    })
+                    rollback_success = await product_service.release_inventory( 
                         product_id=str(product_id), quantity=int(quantity)
-                    )
-                    if success:
-                        logger.info(f"Inventory released for product {product_id}, quantity {quantity}.")
+                    ) 
+                    if rollback_success:
+                        logger.info("Inventory rolled back for product", extra={
+                            "product_id": product_id, 
+                            "quantity": quantity
+                        })
                         item_span.set_status(Status(StatusCode.OK))
                     else:
-                        logger.error(f"Failed to release inventory for product {product_id}, quantity {quantity} for FAILED order {order_id}.")
-                        item_span.set_status(Status(StatusCode.ERROR,"Inventory release failed"))
+                        logger.error("Failed to rollback inventory for product.", extra={
+                            "product_id": product_id,
+                            "quantity": quantity,
+                            "order_id": order_id
+                        })
+                        item_span.set_status(Status(StatusCode.ERROR, "Inventory rollback failed"))
+                        all_rollbacks_successful = False # Mark overall as failed
+            
+            # Create an Outbox event indicating the outcome of inventory adjustment for the failed order
+            # The status should reflect if all rollbacks were successful or not
+            outbox_event_status = "completed" if all_rollbacks_successful else "failed_partial" # Or "failed_complete" if no items processed
+            if not items: # If there were no items, it's vacuously completed
+                 outbox_event_status = "completed_no_items"
+
+            await self.create_outbox_event_for_product_module(
+                event_data=event_data, 
+                event_type="product_inventory_adjustment_for_order_failure", 
+                status=outbox_event_status 
+            )
+            
+            # Set overall span status based on rollback success
+            # _process_event_with_retries will set its span to OK if this method doesn't raise an exception.
+            # If we want this handler's span (ProductManager._handle_order_failed_logic) to reflect partial failure,
+            # we could set it here. However, _process_event_with_retries will set its span status.
+            # For now, rely on logs and item_span statuses for partial failures.
+            # If !all_rollbacks_successful, it might be an ERROR for this span.
+            if not all_rollbacks_successful and items: # only error if there were items and they failed
+                 span.set_status(Status(StatusCode.ERROR, "One or more inventory rollbacks failed for order_failed event"))
+            else:
+                 span.set_status(Status(StatusCode.OK)) # All rollbacks successful or no items to rollback
+
+            logger.info(f"'order_failed' event processing finished with overall rollback status: {outbox_event_status}.", extra={"order_id": order_id})
 
 
-    async def handle_order_failed(self, event_data: dict):
+    async def handle_order_failed(self, event_data: dict, parent_context=None, message_attributes: Dict = None):
         await self._process_event_with_retries(
             event_name="order_failed",
             event_data=event_data,
             handler_logic_method=self._handle_order_failed_logic,
-            # order_failed 처리 실패 시 보상 로직은 보통 없음 (이미 실패 흐름)
-            # 하지만 로깅/알림은 중요
-            compensation_method=lambda data, type, reason: self._store_failed_event(type, data, reason) # 예시: 실패 이벤트 저장
+            parent_context=parent_context,
+            message_attributes=message_attributes,
+            compensation_method=self.create_compensation_event_for_product_failure
         )
 
-    async def create_compensation_event(self, original_event_data: dict, failure_type: str, reason: str):
-        # tracer = trace.get_tracer(__name__)
+    async def create_compensation_event_for_product_failure(self, original_event_data: dict, failure_type: str, reason: str):
+        current_span = trace.get_current_span()
+        
         with self.tracer.start_as_current_span(
-            "ProductManager.create_compensation_outbox_event"
+            "ProductManager.create_compensation_event_for_product_failure",
         ) as span:
-            order_id = original_event_data.get("order_id", "unknown")
-            span.set_attribute("app.original_order_id", str(order_id))
-            span.set_attribute("app.compensation.failure_type", failure_type)
-            span.set_attribute("app.compensation.reason", reason)
-            logger.info(f"ProductManager: Creating compensation event for order '{order_id}' due to '{failure_type}': {reason}")
+            order_id = original_event_data.get("order_id", "unknown_order")
+            span.set_attribute("app.order_id", str(order_id))
+            span.set_attribute("app.failure_type", failure_type)
+            span.set_attribute("app.failure_reason", reason)
+
+            logger.warning("Creating compensation event for product failure", extra={
+                "order_id": order_id,
+                "failure_type": failure_type,
+                "reason": reason
+            })
+
+            event_payload = {
+                "original_event_trace_id": f"{current_span.get_span_context().trace_id:x}" if current_span.is_recording() else None,
+                "original_event_span_id": f"{current_span.get_span_context().span_id:x}" if current_span.is_recording() else None,
+                "order_id": order_id,
+                "failure_details": {
+                    "failed_module": "product-service",
+                    "event_type_failed": original_event_data.get("type", original_event_data.get("event_name", "unknown")), # Use event_name if type not present
+                    "failure_type": failure_type, 
+                    "reason": reason,
+                },
+                "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            }
+
+            # Determine a more specific aggregatetype for compensation related to product processing
+            # Example: if original event was "order_success" that failed in product_service
+            original_event_name = original_event_data.get("event_name", "unknown_event") # from _process_event_with_retries
             
-            try:
-                async with WriteSessionLocal() as session: # Product 모듈의 DB 세션 사용
-                    async with session.begin():
-                        compensation_payload = {
-                            "type": f"{failure_type}_compensation_needed", # 보상 이벤트 타입
-                            "original_order_id": str(order_id),
-                            "reason_for_compensation": reason,
-                            "original_event_preview": json.dumps(original_event_data, ensure_ascii=False)[:256],
-                            "timestamp": datetime.datetime.utcnow().isoformat(timespec="microseconds") + "Z",
-                        }
+            outbox_aggregatetype = "product_compensation"
+            outbox_event_type = f"product_processing_failed_for_{original_event_name}"
 
-                        current_otel_span = trace.get_current_span()
-                        context_to_propagate = trace.set_span_in_context(current_otel_span)
-                        carrier = {}
-                        propagator_instance = propagate.get_global_textmap()
-                        propagator_instance.inject(carrier, context=context_to_propagate)
-                        span.add_event("TraceContextInjectedToCarrierForCompensationOutbox", {"traceparent": carrier.get('traceparent')})
+            # Inject current OTel context into a carrier dictionary
+            carrier = {}
+            propagate.inject(carrier)
 
-                        outbox_record = Outbox( # Product 모듈의 Outbox 모델 사용
-                            id=str(uuid.uuid4()),
-                            aggregatetype="product_compensation", # 또는 "order_compensation_from_product"
-                            aggregateid=str(order_id), # 또는 새로운 보상 ID
-                            type=compensation_payload["type"],
-                            payload=json.dumps(compensation_payload), # JSON 문자열로 저장
-                            traceparent_for_header=carrier.get("traceparent"),
-                            tracestate_for_header=carrier.get("tracestate"),
-                        )
-                        session.add(outbox_record)
-                        logger.info(f"Compensation event for order '{order_id}' added to ProductModule's Outbox.")
-                        span.set_status(Status(StatusCode.OK))
-            except Exception as e:
-                error_msg = f"CRITICAL: Failed to create compensation event for order '{order_id}' in ProductModule: {e}"
-                logger.critical(error_msg, exc_info=True)
-                if span.is_recording():
-                    span.record_exception(e)
-                    span.set_status(Status(StatusCode.ERROR, "Failed to write compensation to ProductOutbox"))
+            outbox_event = Outbox(
+                id=str(uuid.uuid4()), # Ensure ID is string for consistency
+                aggregatetype=outbox_aggregatetype, 
+                aggregateid=str(order_id), 
+                type=outbox_event_type, 
+                payload=json.dumps(event_payload, ensure_ascii=False),
+                # Use the defined model fields for trace propagation
+                traceparent_for_header=carrier.get("traceparent"),
+                tracestate_for_header=carrier.get("tracestate")
+            )
+            
+            # No longer need to set kafka_headers as a separate attribute
+            # outbox_event.kafka_headers = json.dumps(carrier)
+
+            async with WriteSessionLocal() as session:
+                try:
+                    session.add(outbox_event)
+                    await session.commit()
+                    logger.info("Compensation event stored in Outbox for product failure.", extra={
+                        "outbox_event_id": str(outbox_event.id),
+                        "order_id": order_id,
+                        "failure_type": failure_type,
+                        "outbox_event_type": outbox_event_type
+                    })
+                    span.set_status(Status(StatusCode.OK))
+                except Exception as e_db:
+                    logger.error("Failed to store compensation event in Outbox", extra={
+                        "order_id": order_id,
+                        "error": str(e_db)
+                    }, exc_info=True)
+                    if span.is_recording():
+                        span.record_exception(e_db)
+                        span.set_status(Status(StatusCode.ERROR, "Failed to store compensation event"))
+
+    async def create_outbox_event_for_product_module(self, event_data: dict, event_type: str, status: str):
+        current_span = trace.get_current_span()
+        
+        with self.tracer.start_as_current_span(
+            f"ProductManager.create_outbox_event.{event_type}.{status}",
+        ) as span:
+            order_id = event_data.get("order_id", "unknown_order")
+            span.set_attribute("app.order_id", str(order_id))
+            span.set_attribute("app.event.created_type", event_type)
+            span.set_attribute("app.event.created_status", status)
+
+            logger.info(f"Creating Outbox event for product module: {event_type}, status: {status}", extra={
+                "order_id": order_id
+            })
+
+            payload = {
+                "order_id": order_id,
+                "source_module": "product-service",
+                "event_type_processed": event_data.get("type", event_data.get("event_name", "unknown")), # The event that ProductManager processed
+                "resulting_event_type": event_type, 
+                "status": status, 
+                "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            }
+            
+            # Inject current OTel context into a carrier dictionary
+            carrier = {}
+            propagate.inject(carrier)
+
+            outbox_event = Outbox(
+                id=str(uuid.uuid4()), # Ensure ID is string
+                aggregatetype="product_process_outcome", 
+                aggregateid=str(order_id),
+                type=event_type, 
+                payload=json.dumps(payload, ensure_ascii=False),
+                # Use the defined model fields for trace propagation
+                traceparent_for_header=carrier.get("traceparent"),
+                tracestate_for_header=carrier.get("tracestate")
+            )
+
+            async with WriteSessionLocal() as session:
+                try:
+                    session.add(outbox_event)
+                    await session.commit()
+                    logger.info("Product module Outbox event stored.", extra={
+                        "outbox_event_id": str(outbox_event.id),
+                        "order_id": order_id,
+                        "type": event_type,
+                        "status": status
+                    })
+                    span.set_status(Status(StatusCode.OK))
+                except Exception as e_db:
+                    logger.error("Failed to store product module Outbox event", extra={
+                        "order_id": order_id,
+                        "error": str(e_db)
+                    }, exc_info=True)
+                    if span.is_recording():
+                        span.record_exception(e_db)
+                        span.set_status(Status(StatusCode.ERROR, "Failed to store product Outbox event"))
 
 
     async def _store_failed_event(self, event_type: str, event_data: dict, error_msg: str):
-        # 이 함수는 Product 모듈의 FailedEvent 모델을 사용해야 함 (별도 구현 필요 시)
-        # tracer = trace.get_tracer(__name__)
-        with self.tracer.start_as_current_span("ProductManager._store_failed_event_in_product_db") as span:
-            logger.warning(f"ProductManager: Storing failed event of type '{event_type}'. Error: {error_msg}. Data: {str(event_data)[:200]}")
-            # ... (Product 모듈 DB에 실패 이벤트 저장 로직) ...
-            span.set_attribute("app.failed_event.type", event_type)
+        # This method is not directly used by the refactored compensation logic
+        # but kept for potential other uses or if specific "failed event" storage is needed
+        # outside of SAGA compensation Outbox events.
+        current_span = trace.get_current_span()
+        with self.tracer.start_as_current_span("ProductManager._store_failed_event") as span:
+            order_id = event_data.get("order_id", "unknown_order")
+            logger.error("Storing details of a failed event processing.", extra={
+                "event_type": event_type,
+                "order_id": order_id,
+                "error_message": error_msg,
+                "event_data_preview": json.dumps(event_data)[:256]
+            })
+            span.set_attribute("app.event.type", event_type)
+            span.set_attribute("app.order_id", str(order_id))
+            span.set_attribute("app.error.message", error_msg)
+            # Potentially write to a specific "dead letter" table or log for later analysis
+            # For now, this is primarily for logging and tracing.
+            span.set_status(Status(StatusCode.ERROR, "Failed event stored/logged"))
 
     async def stop(self):
         if self.kafka_consumer:

@@ -6,56 +6,69 @@ from app.config.database import engine, Base, get_product_collection
 from pymongo import IndexModel, ASCENDING
 
 async def initialize_categories(db: AsyncSession):
-    """기본 카테고리 초기화"""
+    """기본 카테고리 초기화 (Note: CategoryManager service is DEPRECATED)"""
     try:
-        # 기존 카테고리가 있는지 확인
         from app.models.category import Category
         existing_categories = await db.execute(select(Category))
         if existing_categories.first():
-            logger.info("Categories already initialized, skipping")
-            return  # 이미 데이터가 있으면 초기화 건너뜀
+            logger.info("Categories already initialized, skipping.")
+            return
             
-        # 카테고리 매니저 인스턴스 생성
         manager = CategoryManager(db)
         
-        # 최상위 카테고리 생성
         electronics = await manager.create_category("전자제품")
-        
-        # 하위 카테고리 생성
         computers = await manager.create_category("컴퓨터", electronics.category_id)
         smartphones = await manager.create_category("스마트폰", electronics.category_id)
-        
-        # 더 깊은 하위 카테고리
         laptops = await manager.create_category("노트북", computers.category_id)
-        gaming_laptops = await manager.create_category("게이밍 노트북", laptops.category_id)
+        await manager.create_category("게이밍 노트북", laptops.category_id)
         
-        # 기본 상품 연결 예시
+        # Example product association
+        # This part might also be deprecated if product-category links are managed elsewhere
         await manager.associate_product_with_category("P123456", smartphones.category_id, is_primary=True)
         await manager.associate_product_with_category("P123456", electronics.category_id, is_primary=False)
         
-        logger.info("Categories initialized successfully")
+        logger.info("Categories initialized successfully (using DEPRECATED CategoryManager).", 
+                    extra={"service_used": "CategoryManager"})
     except Exception as e:
-        logger.error(f"Error initializing categories: {str(e)}")
-        await db.rollback()
+        logger.error("Error initializing categories.", extra={"error": str(e)}, exc_info=True)
+        # Rollback might not be necessary if create_category handles its own transactions and rolls back.
+        # However, if initialize_categories itself forms a larger transaction context, this is correct.
+        # Assuming CategoryManager methods commit individually, so this rollback is a safety measure.
+        try:
+            await db.rollback()
+        except Exception as rb_exc: # pylint: disable=broad-except
+            logger.error("Error during rollback after category initialization failure.", 
+                         extra={"rollback_error": str(rb_exc)}, exc_info=True)
 
 async def create_mongodb_indexes():
     """MongoDB 인덱스 생성"""
     try:
         product_collection = await get_product_collection()
         if not product_collection:
-            raise Exception("Failed to get MongoDB collection")
+            # This case should ideally not happen if get_product_collection raises an error or is always available.
+            logger.error("Failed to get MongoDB product collection for index creation.")
+            raise Exception("Failed to get MongoDB product collection for index creation.") # Or return/handle gracefully
             
-        # 이미 인덱스가 있는지 확인
         existing_indexes = await product_collection.index_information()
+        
+        # Check for a specific, uniquely named index to determine if setup has run.
+        # Example: Using the unique index on 'product_id'
         if 'product_id_1' in existing_indexes:
-            logger.info("MongoDB indexes already exist, skipping")
+            logger.info("MongoDB indexes already exist, skipping creation.")
             return
         
-        # 인덱스 생성
-        await product_collection.create_index([("product_id", ASCENDING)], unique=True)
-        await product_collection.create_index([("title", ASCENDING)])
-        await product_collection.create_index([("category_ids", ASCENDING)])
+        # Define indexes to be created
+        indexes_to_create = [
+            IndexModel([("product_id", ASCENDING)], name="product_id_1", unique=True),
+            IndexModel([("title", ASCENDING)], name="title_1"),
+            IndexModel([("category_ids", ASCENDING)], name="category_ids_1")
+        ]
         
-        logger.info("MongoDB indexes created successfully")
+        # Create indexes
+        # The create_indexes method is generally preferred as it can create multiple indexes efficiently.
+        await product_collection.create_indexes(indexes_to_create)
+        
+        logger.info("MongoDB indexes created successfully.", 
+                    extra={"indexes_created": [idx.document.get('name') for idx in indexes_to_create]}) 
     except Exception as e:
-        logger.error(f"Error creating MongoDB indexes: {str(e)}")
+        logger.error("Error creating MongoDB indexes.", extra={"error": str(e)}, exc_info=True)
