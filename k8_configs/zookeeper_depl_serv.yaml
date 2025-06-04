@@ -20,7 +20,16 @@ spec:
           ports:
             - containerPort: 2181
               name: zookeeper-port
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "250m"
           env:
+            - name: ZOOKEEPER_HEAP_SIZE
+              value: "256M"
             - name: ZOOKEEPER_CLIENT_PORT
               value: "2181"
             - name: ZOOKEEPER_TICK_TIME

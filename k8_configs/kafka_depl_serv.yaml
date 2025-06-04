@@ -20,7 +20,16 @@ spec:
           ports:
             - containerPort: 9092
               name: kafka-port
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
           env:
+            - name: KAFKA_HEAP_OPTS
+              value: "-Xms512m -Xmx512m"
             - name: KAFKA_BROKER_ID
               value: "1"
             - name: KAFKA_ZOOKEEPER_CONNECT

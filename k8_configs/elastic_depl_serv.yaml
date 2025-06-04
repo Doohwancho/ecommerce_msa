@@ -35,7 +35,7 @@ spec:
             - name: ELASTIC_PASSWORD
               value: "changeme" # 기본 비밀번호
             - name: ES_JAVA_OPTS
-              value: "-Xms4g -Xmx4g" # 힙 메모리 4GB로 증가
+              value: "-Xms1g -Xmx1g" # 힙 메모리 1GB로 감소
           ports:
             - containerPort: 9200
               name: http
@@ -43,11 +43,11 @@ spec:
               name: transport
           resources:
             limits:
-              cpu: 4000m
-              memory: 8Gi # 컨테이너 메모리 제한 8GB로 증가
+              cpu: "1000m" # CPU 제한 1코어로 감소
+              memory: "3Gi" # 컨테이너 메모리 제한 3GB로 감소
             requests:
-              cpu: 1000m
-              memory: 4Gi # 컨테이너 메모리 요청 4GB로 증가
+              cpu: "500m" # CPU 요청 0.5코어로 감소
+              memory: "2Gi" # 컨테이너 메모리 요청 2GB로 감소
           volumeMounts:
             - name: elasticsearch-data
               mountPath: /usr/share/elasticsearch/data

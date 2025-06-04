@@ -24,7 +24,7 @@ metadata:
     app: mongodb
 spec:
   serviceName: "mongodb-service"
-  replicas: 3
+  replicas: 2
   selector:
     matchLabels:
       app: mongodb
@@ -53,13 +53,13 @@ spec:
                 secretKeyRef:
                   name: mongodb-secret
                   key: mongo-root-password
-          # resources:
-          #   requests:
-          #     memory: "512Mi"
-          #     cpu: "200m"
-          #   limits:
-          #     memory: "1Gi"
-          #     cpu: "500m"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
           volumeMounts: # Persistent Data
             - name: mongodb-data
               mountPath: /data/db # this is the directory inside the container where MongoDB stores data
