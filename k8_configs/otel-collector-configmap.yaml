@@ -24,7 +24,13 @@ data:
         endpoint: jaeger:4317 # Jaeger 서비스의 OTLP gRPC 엔드포인트 (Jaeger 서비스 이름과 포트 확인 필요)
         tls:
           insecure: true # Jaeger의 TLS 설정에 맞춰야 함
-
+      elasticsearch/applogs: # New Elasticsearch exporter for application logs
+        endpoints: [http://elasticsearch-service:9200]
+        logs_index: "my-app-logs-test" 
+        mapping: 
+          mode: "none"
+        tls:
+          insecure: true 
     service:
       pipelines:
         traces:
@@ -38,4 +44,4 @@ data:
         logs:
           receivers: [otlp]
           processors: [batch]
-          exporters: [debug]
+          exporters: [debug, elasticsearch/applogs]

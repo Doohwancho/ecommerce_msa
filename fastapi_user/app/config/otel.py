@@ -1,7 +1,13 @@
 import os
 import logging
+from app.config.logging import (
+    get_global_tracer_provider, 
+    get_configured_logger, 
+    shutdown_otel_providers
+)
 
-from opentelemetry import trace # 트레이싱용
+import atexit
+from opentelemetry import trace, propagate # 트레이싱용
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -17,8 +23,9 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.grpc import GrpcInstrumentorClient
 from opentelemetry.instrumentation.pymongo import PymongoInstrumentor # PyMongo 계측 유지 (requirements.txt에 있음)
 
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 # LoggingInstrumentation 대신 LoggingInstrumentor 임포트 (0.42b0 버전 호환 추정)
-from opentelemetry.instrumentation.logging import LoggingInstrumentor
+# from opentelemetry.instrumentation.logging import LoggingInstrumentor
 
 # Kafka, SQLAlchemy는 제공된 requirements.txt 및 에러 컨텍스트에 없었으므로 제거합니다.
 # 필요하다면 해당 패키지 및 계측기를 requirements.txt에 추가하고 여기에 임포트/초기화하세요.
@@ -26,7 +33,7 @@ from opentelemetry.instrumentation.logging import LoggingInstrumentor
 # from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
 
 
-logger = logging.getLogger(__name__)
+logger = get_configured_logger(__name__) # app.config.otel 이름으로 로거 가져오기
 
 # OpenTelemetry settings
 OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://otel-collector:4317")
@@ -41,7 +48,7 @@ OTEL_TRACES_SAMPLER = os.getenv("OTEL_TRACES_SAMPLER", "always_on") # always_on,
 # OTEL_TRACES_EXPORTER = os.getenv("OTEL_TRACES_EXPORTER", "otlp")
 
 
-def setup_telemetry():
+def setup_non_logging_telemetry(): # 함수 이름 변경: 로깅 관련 설정은 logging_config.py로 이동
     """
     OpenTelemetry 설정 (트레이싱 + 포괄적 로깅)을 초기화합니다.
     """
@@ -65,27 +72,16 @@ def setup_telemetry():
         span_processor = BatchSpanProcessor(otlp_span_exporter)
         tracer_provider.add_span_processor(span_processor)
 
-        # --- 로깅 설정 ---
-        # OTLP 로그 익스포터 설정 (로그 레코드를 컬렉터로 보냄)
-        # 트레이스와 같은 OTLP 컬렉터 주소를 사용합니다.
-        otlp_log_exporter = OTLPLogExporter(endpoint=OTEL_EXPORTER_OTLP_ENDPOINT)
 
-        # 로그 레코드 프로세서 생성 (로그 레코드를 모아서 배치로 보냄)
-        log_record_processor = BatchLogRecordProcessor(otlp_log_exporter)
+        # --- 전역 컨텍스트 ---
+        propagators_to_set = [TraceContextTextMapPropagator()]
+        # 만약 W3C Baggage도 사용한다면 리스트에 추가:
+        # from opentelemetry.baggage.propagation import W3CBaggagePropagator
+        # propagators_to_set.append(W3CBaggagePropagator())
 
-        # 로거 프로바이더 생성 (리소스 연결)
-        # 이 프로바이더를 통해 생성된 로거들이 로그를 OpenTelemetry 파이프라인으로 보냅니다.
-        logger_provider = LoggerProvider(resource=resource)
-        logger_provider.add_log_record_processor(log_record_processor)
-
-        # OpenTelemetry 로거 프로바이더를 파이썬의 표준 로깅 시스템에 연결
-        # 이를 통해 표준 logging.getLogger(__name__).info(...) 호출이 OTel 파이프라인으로 흐르게 됩니다.
-        set_logger_provider(logger_provider)
-
-        # OpenTelemetry 로깅 계측 활성화
-        # 이 부분이 표준 logging 라이브러리를 후킹하여 로그 레코드에 트레이스 컨텍스트(Trace ID/Span ID)를 추가하고 OTel 파이프라인으로 보냅니다.
-        LoggingInstrumentor().instrument(log_level=logging.INFO) # Ensure log_level is set for the instrumentor
-
+        if len(propagators_to_set) == 1:
+            propagate.set_global_textmap(propagators_to_set[0])
+            logger.info(f"Global textmap propagator set to: {propagators_to_set[0].__class__.__name__}")
 
         # --- 라이브러리 인스트루멘테이션 설정 ---
         # 서비스에서 사용하는 라이브러리들을 계측하여 자동으로 트레이스/스팬을 생성하게 합니다.
@@ -101,10 +97,37 @@ def setup_telemetry():
         # 사용하는 다른 라이브러리들도 필요에 따라 여기에 추가합니다.
         # 예: Kafka, Redis 등등 필요한 계측기는 여기에 추가하고 위에 임포트해야 합니다.
 
-
         logger.info("OpenTelemetry tracing and logging instrumentation setup completed successfully")
 
     except Exception as e:
         # OpenTelemetry 설정 중 에러가 발생하면 중요한 문제이므로 로깅하고 예외를 다시 발생시키는 것이 좋습니다.
         logger.error(f"Failed to setup OpenTelemetry instrumentation: {str(e)}", exc_info=True) # exc_info=True로 에러 정보도 로깅
         raise # 앱 시작 전에 실패하면 앱 실행을 중단
+
+# atexit 핸들러는 logging_config.py 로 이동 또는 여기서 호출 (중복 등록 방지)
+# 만약 logging_config.py에 이미 atexit.register(shutdown_otel_providers)가 있다면 여기서는 제거
+# 없다면, logging_config.py의 shutdown_otel_providers를 호출하도록 설정
+if not any(func == shutdown_otel_providers for func, _, _ in getattr(atexit, '_registrars', []) if hasattr(atexit, '_registrars')): # 좀 더 안전한 중복 체크
+    atexit.register(shutdown_otel_providers)
+    logger.info("Registered shutdown_otel_providers from otel.py")
+
+
+def instrument_fastapi_app(app):
+    """FastAPI 앱을 OpenTelemetry로 계측합니다."""
+    current_tracer_provider = get_global_tracer_provider() # Getter 사용
+    if current_tracer_provider is None:
+        logger.error(
+            "TracerProvider not available for FastAPI instrumentation via getter. "
+            "Ensure initialize_logging_and_telemetry() set it."
+        )
+        return 
+
+    if app is None:
+        logger.error("FastAPI app instance is None for instrumentation.")
+        raise ValueError("FastAPI app instance cannot be None")
+    try:
+        FastAPIInstrumentor.instrument_app(app, tracer_provider=current_tracer_provider)
+        logger.info(f"FastAPI application instrumented by OpenTelemetry for {OTEL_SERVICE_NAME}")
+    except Exception as e:
+        logger.error(f"Failed to instrument FastAPI app for {OTEL_SERVICE_NAME}: {e}", exc_info=True)
+        # 정책에 따라 오류를 다시 발생시킬 수 있음

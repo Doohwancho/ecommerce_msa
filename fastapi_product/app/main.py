@@ -16,23 +16,28 @@ from opentelemetry.semconv.trace import SpanAttributes # For semantic convention
 from app.grpc.product_server import serve as grpc_serve
 
 # import configs
-from app.config.logging import setup_logging # Import setup_logging
 from app.config.database import (
     Base, write_engine, read_engine, get_mysql_db,
     get_write_product_collection, get_read_product_collection
 )
 from app.config.elasticsearch import elasticsearch_config
-from app.config.otel import setup_telemetry
+import logging
+from app.config.logging import initialize_logging_and_telemetry, get_configured_logger, get_global_logger_provider # Import setup_logging
+from app.config.otel import setup_non_logging_telemetry, instrument_fastapi_app
 from fastapi.responses import JSONResponse
 
-import logging
 
-# Configure logging using the new setup function
-logger = setup_logging() # Use the logger returned by setup_logging
+# --- 1. 로깅 및 OpenTelemetry 핵심 설정 초기화 ---
+# 애플리케이션 시작 시 가장 먼저 호출되어야 함!
+initialize_logging_and_telemetry()
 
-# uvicorn access 로그만 WARNING 레벨로 설정
-uvicorn_access_logger = logging.getLogger("uvicorn.access")
-uvicorn_access_logger.setLevel(logging.WARNING)
+# --- 2. 이 모듈(main.py)에서 사용할 로거 가져오기 ---
+# 이제 initialize_logging_and_telemetry()가 호출되었으므로 안전하게 설정된 로거를 가져옴
+logger = get_configured_logger(__name__) # 또는 get_configured_logger("app.main")
+
+# --- 3. OpenTelemetry 추가 설정 (트레이싱, 주요 라이브러리 계측) ---
+# 로깅 및 Provider 설정이 완료된 후 호출
+setup_non_logging_telemetry()
 
 
 # Initialize OTel tracer for this module
@@ -205,15 +210,16 @@ app = FastAPI(
     lifespan=lifespan # Use the enhanced lifespan manager
 )
 
+# API 라우터 등록
+app.include_router(api_router, prefix="/api")
+
 # Initialize OpenTelemetry after app creation, ensure instrumentors are applied.
 # If FastAPIInstrumentor needs the app instance, it would be FastAPIInstrumentor().instrument_app(app)
 # in setup_telemetry, or ensure setup_telemetry is called such that instrument() works globally.
 # The current order (app = FastAPI, then setup_telemetry) should be fine if FastAPIInstrumentor.instrument()
 # patches globally.
-setup_telemetry()
+instrument_fastapi_app(app) 
 
-# API 라우터 등록
-app.include_router(api_router, prefix="/api")
 
 
 @app.get("/health/live")

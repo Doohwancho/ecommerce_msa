@@ -4,23 +4,31 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.api import api_router
 from app.config.payment_database import Base, write_engine, read_engine, WriteSessionLocal
-from app.config.otel import setup_telemetry as setup_otel_telemetry
+
+from app.config.payment_logging import initialize_logging_and_telemetry, get_configured_logger, get_global_logger_provider
+from app.config.otel import setup_non_logging_telemetry, instrument_fastapi_app
+
 from app.services.payment_manager import PaymentManager
 from contextlib import asynccontextmanager
-from app.config.payment_logging import setup_logging
 from sqlalchemy import text
 import os
+from app.config.payment_logging import initialize_logging_and_telemetry, get_configured_logger
+
 import logging
 
 # Call setup_logging() to configure logging for the application
-setup_logging() 
+initialize_logging_and_telemetry()
 
 # Get the logger after setup
-logger = logging.getLogger(__name__) 
+logger = get_configured_logger(__name__)
+
+setup_non_logging_telemetry() 
+
+
 
 # uvicorn access 로그만 WARNING 레벨로 설정
-uvicorn_access_logger = logging.getLogger("uvicorn.access")
-uvicorn_access_logger.setLevel(logging.WARNING)
+# uvicorn_access_logger = logging.getLogger("uvicorn.access")
+# uvicorn_access_logger.setLevel(logging.WARNING)
 
 async def safe_create_tables_if_not_exist(conn, db_type: str):
     """테이블이 존재하지 않는 경우에만 생성"""
@@ -107,8 +115,10 @@ app = FastAPI(
 app.include_router(api_router, prefix="/api")
 
 # Initialize OpenTelemetry
-setup_otel_telemetry() 
-logger.info("OpenTelemetry (otel.py) setup completed.")
+instrument_fastapi_app(app)
+
+logger.info("FastAPI application instrumentation complete in payment main.py.") # instrument_fastapi_app 내부 로그와 중복될 수 있음
+
 
 # 라이브니스 프로브
 @app.get("/health/live")

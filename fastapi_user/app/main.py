@@ -1,5 +1,4 @@
 from fastapi import FastAPI, Depends, HTTPException
-import logging
 import asyncio
 import uvicorn
 from app.api.api import api_router
@@ -7,15 +6,27 @@ from app.grpc.user_server import serve as user_serve
 from contextlib import asynccontextmanager
 from app.config.grpc_config import set_grpc_task, get_grpc_task
 from app.config.database import get_write_mongo_client, get_read_mongo_client
-from app.config.logging import setup_logging
 from motor.motor_asyncio import AsyncIOMotorClient
 from fastapi.responses import JSONResponse
 from opentelemetry import trace
-from app.config.otel import setup_telemetry
 
-setup_telemetry()
+import logging
+from app.config.logging import initialize_logging_and_telemetry, get_configured_logger, get_global_logger_provider # Import setup_logging
+from app.config.otel import setup_non_logging_telemetry, instrument_fastapi_app
 
-setup_logging()
+# --- 1. 로깅 및 OpenTelemetry 핵심 설정 초기화 ---
+# 애플리케이션 시작 시 가장 먼저 호출되어야 함!
+initialize_logging_and_telemetry()
+
+# --- 2. 이 모듈(main.py)에서 사용할 로거 가져오기 ---
+# 이제 initialize_logging_and_telemetry()가 호출되었으므로 안전하게 설정된 로거를 가져옴
+logger = get_configured_logger(__name__) # 또는 get_configured_logger("app.main")
+
+# --- 3. OpenTelemetry 추가 설정 (트레이싱, 주요 라이브러리 계측) ---
+# 로깅 및 Provider 설정이 완료된 후 호출
+setup_non_logging_telemetry()
+
+tracer = trace.get_tracer("app.main")
 
 # Logger instance should be obtained after logging is configured
 logger = logging.getLogger(__name__)
@@ -43,6 +54,9 @@ app = FastAPI(title="User Service API", lifespan=lifespan)
 
 # API router registration
 app.include_router(api_router, prefix="/api")
+
+instrument_fastapi_app(app) 
+
 
 @app.get("/health/live")
 async def liveness():

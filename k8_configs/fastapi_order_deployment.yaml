@@ -32,12 +32,12 @@ spec:
               value: "product-service"
             - name: PRODUCT_SERVICE_GRPC_PORT
               value: "50051"
-            # mysql 
-            - name: MYSQL_ROUTER_HOST   
+            # mysql
+            - name: MYSQL_ROUTER_HOST
               value: "mycluster"
-            - name: MYSQL_ROUTER_RW_PORT  
-              value: "6446"         
-            - name: MYSQL_ROUTER_RO_PORT  
+            - name: MYSQL_ROUTER_RW_PORT
+              value: "6446"
+            - name: MYSQL_ROUTER_RO_PORT
               value: "6447"
             - name: MYSQL_PORT
               value: "3306"
@@ -51,7 +51,7 @@ spec:
             - name: MYSQL_DATABASE
               valueFrom:
                 secretKeyRef:
-                  name: mysql-secret 
+                  name: mysql-secret
                   key: mysql-database
             - name: MYSQL_HOST
               value: "mysql-service"
@@ -63,7 +63,7 @@ spec:
                   key: KAFKA_BOOTSTRAP_SERVERS
             # otel
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
-              value: "http://otel-collector:4317"
+              value: "otel-collector:4317"
             - name: OTEL_SERVICE_NAME
               value: "fastapi-order-service"
             - name: OTEL_TRACES_SAMPLER

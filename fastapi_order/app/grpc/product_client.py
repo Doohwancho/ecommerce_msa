@@ -38,16 +38,16 @@ def log_product_client_retry_attempt(retry_state: RetryCallState):
     if retry_state.outcome and retry_state.outcome.failed:
         exc = retry_state.outcome.exception()
         exception_info = f" due to: {exc.__class__.__name__} - {str(exc)}"
-        if current_span.is_recording():
-            current_span.add_event(
-                "gRPCMethodRetryAttempt",
-                attributes={
-                    "retry.attempt_number": attempt_number,
-                    "retry.exception_type": exc.__class__.__name__,
-                    "retry.exception_message": str(exc),
-                    "retry.delay_since_first_attempt_ms": retry_state.delay_since_first_attempt * 1000
-                }
-            )
+    if current_span.is_recording():
+        current_span.add_event(
+            "gRPCMethodRetryAttempt",
+            attributes={
+                "retry.attempt_number": attempt_number,
+                "retry.exception_type": exc.__class__.__name__ if retry_state.outcome and retry_state.outcome.failed else "N/A", # Ensure exc is defined
+                "retry.exception_message": str(exc) if retry_state.outcome and retry_state.outcome.failed else "N/A", # Ensure exc is defined
+                "retry.delay_since_first_attempt_ms": retry_state.delay_since_first_attempt * 1000
+            }
+        )
     logger.warning(f"Retrying ProductClient gRPC call, attempt {attempt_number}{exception_info}")
 
 
@@ -123,7 +123,7 @@ class ProductClient:
                     span.set_attribute("app.product.found", False)
                     span.set_status(Status(StatusCode.ERROR, "ProductNotFoundByServiceLogic")) # 서비스 로직상 못 찾은 것도 에러로 간주 가능
                     raise HTTPException(status_code=404, detail=f"Product {product_id} not found via ProductService")
-
+                
                 span.set_attribute("app.product.found", True)
                 # ... (필요한 응답값 속성으로 추가)
                 span.set_status(Status(StatusCode.OK))
@@ -175,7 +175,7 @@ class ProductClient:
                 request = product_pb2.InventoryRequest(product_id=product_id, quantity=quantity) # 요청 객체 이름 확인
                 logger.info(f"ProductClient: Calling CheckAndReserveInventory for product {product_id}, quantity {quantity}")
                 response = await self.stub.CheckAndReserveInventory(request, timeout=self.default_timeout)
-                
+
                 span.set_attribute("app.inventory.reservation.success", response.success)
                 span.set_attribute("app.inventory.reservation.message", response.message[:256])
                 if response.success:
