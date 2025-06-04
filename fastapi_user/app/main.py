@@ -13,6 +13,7 @@ from opentelemetry import trace
 import logging
 from app.config.logging import initialize_logging_and_telemetry, get_configured_logger, get_global_logger_provider # Import setup_logging
 from app.config.otel import setup_non_logging_telemetry, instrument_fastapi_app
+import json 
 
 # --- 1. 로깅 및 OpenTelemetry 핵심 설정 초기화 ---
 # 애플리케이션 시작 시 가장 먼저 호출되어야 함!
@@ -113,13 +114,13 @@ async def readiness():
         status_details["grpc"] = "failed"
     
     if errors:
-        logger.warning("Readiness probe failed.", extra={"status_details": status_details, "errors_count": len(errors)})
+        logger.warning("Readiness probe failed.", extra={"status_details": json.dumps(status_details), "errors_count": len(errors)})
         return JSONResponse(
             status_code=503,
             content={"status": "not ready", "details": status_details, "errors": errors}
         )
     
-    logger.info("Readiness probe successful.", extra={"status_details": status_details})
+    logger.info("Readiness probe successful.", extra={"status_details": json.dumps(status_details)})
     return {"status": "ready", "details": status_details}
 
 @app.get("/test-connections")
