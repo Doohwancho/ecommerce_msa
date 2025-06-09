@@ -1,10 +1,58 @@
 # A. what
 
+![](./documents/images/architecture.png)
 basic ecommerce MSA
 
-## a. architecture
+## a. Index
 
-![](./documents/images/architecture.png)
+1. [Q. 데이터를 어떻게 저장하지?](#b-데이터를-어떻게-저장하지)
+    1. 요구사항
+    2. 데이터가 어떨 때 RDB가 더 유리하고 NOSQL이 더 유리할까?
+    3. if NOSQL, mongodb vs elastic search 성능 비교
+    4. mongodb & elastic search를 어떻게 써야할까?
+    5. DB를 도메인 별로 쪼개서 저장해야 할까?
+    6. update 즉시 적용 vs eventual consistency
+    7. 상품 데이터는 어느 DB에 어느 데이터 구조로 저장하지?
+    8. 계층화된 상품 카테고리 정보는 어디에 저장하는게 좋을까?
+2. [Q. MSA 환경에서 컨테이너들이 어떻게 통신하지?](#c-msa에서-컨테이너끼리-어떻게-통신하지)
+    1. MSA 컨테이너 간 통신 프로토콜 비교 (JSON vs HTTPx vs gRPC)
+3. [Q. 동기? 비동기?](#d-msa에서-동기-비동기)
+    1. create_order()에 전체 흐름 파악
+    2. 선행지식) 동기 vs 비동기 차이는?
+    3. 돌아와서, grpc 통신 부분은 동기? 비동기?
+    4. 선행지식) fastapi에서 동기/비동기 처리 메커니즘
+    5. grpc 이후에 DB i/o 부분은 동기? 비동기?
+4. [Q. kafka로 이벤트 담아 처리할 때 유실되지 않고 확실하게 처리하는 방법은?](#e-kafka로-이벤트-담아-처리할-때-유실되지-않고-확실하게-처리하는-방법은)
+    1. 비동기 통신과 kafka에 티켓넣고 구독하는 통신과 뭐가 다른거지?
+    2. 로직을 끝내고 이벤트를 produce 했는데 로직은 commit이 끝났는데 product(event)에러 에러났으면?
+    3. produce(event)가 중복으로 들어갔다면?
+    4. kafka.send()가 실패했다면?
+5. [Q. 분산 시스템에서 트랜젝션 방법은?](#f-분산시스템에서의-트랜젝션r-kafka편)
+    1. 분산 시스템에서 transaction & rollback을 어떻게 처리하지?
+    2. 결과 (mermaid flowchart)
+6. [Q. 상품재고의 overselling 문제를 어떻게 해결하지?](#g-상품재고의-overselling-문제를-어떻게-해결하지)
+    1. overselling 문제
+    2. solution: 예약 재고 수량 트래킹
+    3. 재고량 & 예약재고량을 nosql에서 트래킹하는게 맞을까?
+    4. 도입
+7. [Q. ecommerce에서 상품의 read optimization?](#h-ecommerce에서-상품의-read-optimization)
+    1. mongodb에 100만 데이터 넣고 stress test
+    2. elastic search에 100만 데이터 넣고 stress test 후 결과 비교
+    3. monstache로 mongodb replica set과 elastic search 실시간 sync
+8. [Q. 상품 검색 방법?](#i-상품-검색-방법)
+    1. tokenizers 비교
+    2. 형태소 분석기 비교
+    3. all_text로 검색 걸리는 필드 합치기
+    4. 다양한 검색방법론
+    5. 동의어사전 & 유의어사전
+9. [Q. k8s container의 안정성을 높히는 방법은?](#j-k8s-container의-안정성을-높히는-방법은)
+    1. mysql HA
+    2. mongodb HA
+    3. opentelemetry
+    4. jaeger
+    5. resilience
+    6. logging
+
 
 ## b.tech stacks
 
@@ -14,7 +62,6 @@ basic ecommerce MSA
   - gRPC (communication between containers, async but 즉시 update)
   - kafka (event queue, async but eventual consistency)
   - debezium (CDC)
-  - Istio + Envoy proxy(sidecar)
 - database
   - MongoDB (users, product_catalog)
     - 비동기 connector: motor
@@ -22,120 +69,23 @@ basic ecommerce MSA
     - 비동기 connector: aiomysql & sqlalchemy[asyncio]
   - elastic search (logs, products_catalog)
     - 비동기 connector w/ mongodb: monstache
-- sre (yet)
-    - opentelemetry(표준)
+- sre
+    - opentelemetry
         - logging
-          - beats
           - elastic search
           - kibana
-        - monitoring
-          - prometheus
-          - grafana
         - tracing
           - jaeger (distributed tracing)
-- devops (yet)
-    - terraform
-    - argo CD
 
 ## c. ERD
 
 ![](./documents/images/erd.png)
 
 
-# B. Index
 
-1. Q. 데이터를 어떻게 저장하지?
-    1. 요구사항
-    2. 데이터가 어떨 때 RDB가 더 유리하고 NOSQL이 더 유리할까?
-    3. if NOSQL, mongodb vs elastic search 성능 비교
-    4. mongodb & elastic search를 어떻게 써야할까?
-    5. DB를 도메인 별로 쪼개서 저장해야 할까?
-    6. update 즉시 적용 vs eventual consistency
-    7. 상품 데이터는 어느 DB에 어느 데이터 구조로 저장하지?
-    8. 계층화된 상품 카테고리 정보는 어디에 저장하는게 좋을까?
-2. Q. MSA 환경에서 컨테이너들이 어떻게 통신하지?
-    1. MSA 컨테이너 간 통신 프로토콜 비교 (JSON vs HTTPx vs gRPC)
-3. Q. 동기? 비동기?
-    1. create_order()에 전체 흐름 파악
-    2. 선행지식) 동기 vs 비동기 차이는?
-    3. 돌아와서, grpc 통신 부분은 동기? 비동기?
-    4. 선행지식) fastapi에서 동기/비동기 처리 메커니즘
-    5. grpc 이후에 DB i/o 부분은 동기? 비동기?
-4. Q. kafka로 이벤트 담아 처리할 때 유실되지 않고 확실하게 처리하는 방법은?
-    1. 비동기 통신과 kafka에 티켓넣고 구독하는 통신과 뭐가 다른거지?
-    2. 로직을 끝내고 이벤트를 produce 했는데 로직은 commit이 끝났는데 product(event)에러 에러났으면?
-    3. produce(event)가 중복으로 들어갔다면?
-    4. kafka.send()가 실패했다면?
-5. Q. 분산 시스템에서 트랜젝션 방법은?
-    1. 분산 시스템에서 transaction & rollback을 어떻게 처리하지?
-    2. 결과 (mermaid flowchart)
-6. Q. 상품재고의 overselling 문제를 어떻게 해결하지?
-    1. overselling 문제
-    2. solution: 예약 재고 수량 트래킹
-    3. 재고량 & 예약재고량을 nosql에서 트래킹하는게 맞을까?
-    4. 도입
-7. Q. ecommerce에서 상품의 read optimization?
-    1. mongodb에 100만 데이터 넣고 stress test
-    2. elastic search에 100만 데이터 넣고 stress test 후 결과 비교
-    3. monstache로 mongodb replica set과 elastic search 실시간 sync
-8. Q. 상품 검색 방법?
-    1. tokenizers 비교
-    2. 형태소 분석기 비교
-    3. all_text로 검색 걸리는 필드 합치기
-    4. 다양한 검색방법론
-    5. 동의어사전 & 유의어사전
-9. Q. k8s container의 안정성을 높히는 방법은? (yet)
-    1. 헬스 체크 및 정상 종료 구현(다른 모든 것의 기반이 됨)
-    2. HA구성 (가용성 확보 + 단일 장애점 제거): replica set(여러 pod 복제본 유지), load balancing(트래픽을 여러 pod에 분산하여 한 pod가 죽어도 서비스 지속) 설정
-    3. open telemetry 표준
-    4. loging to beats + elastic search
-    5. tracing(jaeger)
-    6. istio for circuit breaker, Resilience4J for 복원
-    7. stress test -> 장애 복구
-10. Q. 무중단으로 자동화 배포하는 방법은? (yet)
-    1. 로컬에 jenkins 서버 띄워보기
-        - Jenkins 설치 및 구성
-        - 기본 파이프라인 설정
-        - 빌드 에이전트 구성
-        - 테스트 파이프라인 실행
-    2. terraform으로 aws-ec2하나 만들어서 jenkins 서버 만들고 jenkins 서버 띄워보기
-    3. user module에 간단한 unit test하나 만들고, fastapi, mongodb 이거 두개만 eks로 띄워보기
-    4. mongodb가 무중단 하면서 배포하는걸 테스트해보기
-        - 롤링 업데이트 구성
-        - MongoDB 무중단 배포 테스트
-        - 업데이트 중 데이터베이스 지속성 확인
-        - 롤백 전략 테스트
-    5. argo CD로 전체 cicd 파이프라인 구성
-        - GitOps용 Argo CD 설정
-        - 애플리케이션 매니페스트 구성
-        - 환경 간 승격 구현
-        - 전체 배포 워크플로 테스트
+# B. 데이터를 어떻게 저장하지?
 
----
-- x. ?. Q. 컨슈머 그룹 리밸런싱 전략: Kafka 컨슈머 리밸런싱 시 발생할 수 있는 지연을 최소화하는 전략이 필요합니다.
-- x. ?. Q. 오프셋 관리: 자동 커밋 vs 수동 커밋 전략을 명확히 정의하면 좋겠습니다.
-- x. Q. 상품 추천 방법? (yet)
-    1. content based filtering
-        - 상품 특성 추출 설계
-        - 유사성 계산 구현 (코사인, 자카드)
-        - 초기 추천 엔진 생성
-        - 샘플 사용자 데이터로 테스트
-    2. collaborative filtering
-        - 사용자-아이템 상호작용 매트릭스 설계
-        - 사용자 기반 협업 필터링 구현
-        - 아이템 기반 협업 필터링 구현
-        - 과거 데이터로 정확도 테스트
-    3. 매트릭스 분해 접근 방식 평가
-    4. deep learning 기반 추천 모델
-    5. 추천 유사도는 어떤 기준으로 하지?
-        - 다차원 유사성 계산 설계
-        - 다양한 상품 속성에 대한 가중치 전략 구현
-        - 추천 다양성 테스트
-        - 유사성 알고리즘 최적화
-
-# C. 데이터를 어떻게 저장하지?
-
-## a-1. 요구사항
+## b-1. 요구사항
 
 - a. 상품 데이터
   1. nike같이 신발만 파는게 아닌, 아마존처럼 다양한 종류의 상품을 판매 (= 상품 카테고리 종류가 많음)
@@ -149,7 +99,7 @@ basic ecommerce MSA
   2. 6개월 이상 미접속시 휴면 계정으로 전환
   3. 트래픽이 갑작스럽게 몰렸을 때 scale up or out 가능해야 한다.
 
-## a-2. RDB vs NOSQL
+## b-2. RDB vs NOSQL
 
 Q. 데이터가 어떨 때 RDB가 더 유리하고 NOSQL이 더 유리할까?
 
@@ -167,7 +117,7 @@ Q. 데이터가 어떨 때 RDB가 더 유리하고 NOSQL이 더 유리할까?
     - 그래서 기존에 RDB 쓰는 곳들은 트래픽 몰릴걸 미리 예측해서 미리 과도하게 스케일 업 해놓고 끝나면 다시 내리는 식으로 대응했는데, nosql을 쓰면 무중단으로 스케일 아웃 가능하다.
   - 대규모 데이터인 경우, sharding을 해야할 때가 오는데, 이 때, nosql이 RDB보다 더 유리하다.
 
-## a-3. if NOSQL, mongodb vs elastic search 성능 비교
+## b-3. if NOSQL, mongodb vs elastic search 성능 비교
 
 | **기준**             | **Elasticsearch**                            | **MongoDB**                          |
 | -------------------- | -------------------------------------------- | ------------------------------------ |
@@ -181,13 +131,13 @@ Q. elastic search가 더 빠르면 왜 굳이 mongodb에 상품데이터 저장�
 
 A. elastic search는 transaction 지원을 안함. 따라서 메인 DB로는 부적합하다.
 
-## a-4. mongodb & elastic search를 어떻게 써야할까?
+## b-4. mongodb & elastic search를 어떻게 써야할까?
 
 read:write가 9:1 이상인 ecommerce 도메인의 상품데이터는,\
 원본데이터는 mongodb에 저장하고,\
 검색용 or 추천용 필드만 뽑아서 elatic search에 sync 맞추자. (eventual consistency)
 
-## a-5. DB를 도메인 별로 쪼개서 저장해야 할까?
+## b-5. DB를 도메인 별로 쪼개서 저장해야 할까?
 
 데이터 규모에 따라 달라진다.
 
@@ -199,7 +149,7 @@ read:write가 9:1 이상인 ecommerce 도메인의 상품데이터는,\
   1. 그러나 order & user 처럼 join 필요한 경우라면 왠만하면 하나의 DB에서 쓰는게 유리할 수 있다.
 
 
-## a-6. update 즉시 적용 vs eventual consistency
+## b-6. update 즉시 적용 vs eventual consistency
 
 정보가 모든 모듈에 대하여 consistent 해야하고, up-to-date해야 하는 경우가 있다. (예를들면, 돈과 관련된 정보들)\
 쪼개진 여러 backend-server들이 같은 db에 같은 테이블을 참조하게 하거나,\
@@ -213,7 +163,7 @@ read:write가 9:1 이상인 ecommerce 도메인의 상품데이터는,\
 elastic search 서버가 다운되도 mongodb에서 가져올 수 있기 때문에, consistency가 떨어져도 availability을 높힐 수 있다.
 
 
-## a-7. 상품 데이터는 어느 DB에 어느 데이터 구조로 저장하지?
+## b-7. 상품 데이터는 어느 DB에 어느 데이터 구조로 저장하지?
 
 보통 RDB에 상품데이터를 넣고 관리한다고 생각하는데,\
 파는 상품 종류가 몇개 안되면, 테이블 컬럼 정의하기가 용이하지만,\
@@ -242,7 +192,7 @@ Nosql은 비교적 자유롭다.
 데이터를 쪼개서 여러 DB에 나눠서 저장하는 샤딩을 선택하는 경우가 있는데,\
 RDB보다 nosql이 샤딩에 더 유리하다.
 
-## a-8. 계층화된 상품 카테고리 정보는 어디에 저장하는게 좋을까?
+## b-8. 계층화된 상품 카테고리 정보는 어디에 저장하는게 좋을까?
 계층화된 카테고리는 이런 뜻이다.
 
 path 컬럼의 예시)
@@ -448,11 +398,11 @@ db.products.find({ category_level: 2 });
 
 
 
-# D. MSA에서 컨테이너끼리 어떻게 통신하지?
+# C. MSA에서 컨테이너끼리 어떻게 통신하지?
 
 create_order()을 하면, user_validation() 해야해서 유저 모듈과 통신해야 한다.
 
-## a. MSA 컨테이너 간 통신 프로토콜 비교 (JSON vs HTTPx vs gRPC)
+## c-1. MSA 컨테이너 간 통신 프로토콜 비교 (JSON vs HTTPx vs gRPC)
 
 | **기능**          | **JSON (HTTP/1.1)**                             | **HTTPx (HTTP/2)**                     | **gRPC**                                            |
 | ----------------- | ----------------------------------------------- | -------------------------------------- | --------------------------------------------------- |
@@ -468,7 +418,7 @@ create_order()을 하면, user_validation() 해야해서 유저 모듈과 통신
 | **주요 단점**     | - 높은 지연 시간<br>- 데이터 크기 큼            | - 여전히 JSON 오버헤드 존재            | - 학습 곡선 높음<br>- 브라우저 지원 제한            |
 | **적합한 사례**   | - 외부 API<br>- 간단한 내부 통신                | - 성능 개선이 필요한 REST API          | - 고부하 서버 간 통신<br>- 실시간 데이터 처리       |
 
-## b. **결론**
+## c-2. **결론**
 
 - **JSON (HTTP/1.1)**:
   외부 클라이언트 노출, 간단한 통신, 빠른 개발이 필요할 때 선택.
@@ -477,14 +427,14 @@ create_order()을 하면, user_validation() 해야해서 유저 모듈과 통신
 - **gRPC**:
   서버 간 고성능 통신, 실시간 스트리밍, 다중 언어 환경에서 권장.
 
-# E. MSA에서 동기? 비동기?
+# D. MSA에서 동기? 비동기?
 
-## a. 결론
+## d-1. 결론
 - fastapi는 single main thread가 main loop에서 비동기로 처리하면서, 무거운 작업은 별도 쓰레드풀에게 할당하는 식으로 동작한다. (마치 nodejs 처럼)
 - ecommerce는 요청이 1초 내 빠르게 처리해야하는 OLTP 특성을 가졌기 때문에, 가벼운 대부분 요청은 비동기로 처리하고 무거운 작업만 별도로 빼서 쓰레드풀에게 할당하여 처리한다.
 - MSA는 각 모듈간 분리 시키고, 하나의 모듈에서 에러 터진게 다른 모듈로 전파되면 안되기 때문에, 비동기 방식으로 통신해서 서로 분리시킨다.
 
-## b. create_order()에 전체 흐름 파악
+## d-2. create_order()에 전체 흐름 파악
 
 이게 order_module에서 create_order()의 실행 흐름이다.(약식)
 
@@ -498,7 +448,7 @@ create_order()을 하면, user_validation() 해야해서 유저 모듈과 통신
 
 Q. 여기서 어느 부분이 동기여야 하고 어느부분을 비동기로 처리해야 좋을까?
 
-## c. 선행지식) 동기 vs 비동기 차이는?
+## d-3. 선행지식) 동기 vs 비동기 차이는?
 
 1. 동기: 스레드가 작업 끝날 때 까지 기다림(다른 작업 수행 불가능)
 2. 비동기: 스레드가 작업을 시작하고 기다리지 않고 딴일하러 감
@@ -522,7 +472,7 @@ Q. 여기서 어느 부분이 동기여야 하고 어느부분을 비동기로 �
 
 동기보다 어 유리할 수 있다.
 
-## d. 돌아와서, grpc 통신 부분은 동기? 비동기?
+## d-4. 돌아와서, grpc 통신 부분은 동기? 비동기?
 
 grpc는 동기, 비동기 2종류가 있는데, 보통 MSA에서는 비동기로 쓴다.
 
@@ -534,25 +484,25 @@ MSA를 쓰는 이유 중 하나가, 모듈간의 장애 격리인데,\
 컨테이너 하나 터진다고 해서 다른 모듈에 영향을 주면 안되기 때문에,\
 grpc는 비동기로 구현한다.
 
-## e. 선행지식) fastapi에서 동기/비동기 처리 메커니즘
+## d-5. 선행지식) fastapi에서 동기/비동기 처리 메커니즘
 
-### d-1. 비동기 함수 (async def)
+### d-5-1. 비동기 함수 (async def)
 
 - FastAPI는 Uvicorn/Starlette 기반으로, 이들은 비동기 이벤트 루프를 사용합니다
 - async def 함수는 메인 이벤트 루프에서 직접 실행됩니다
 - I/O 작업에서 await 만나면 제어권을 이벤트 루프에 반환하고 다른 태스크를 처리합니다
 - 이벤트 루프는 기본적으로 단일 스레드에서 실행됩니다
 
-### d-2. 동기 함수 (def)
+### d-5-2. 동기 함수 (def)
 
 - FastAPI는 동기 함수를 만나면 자동으로 별도의 스레드풀로 오프로드합니다
 - 이 작업은 메인 이벤트 루프를 차단하지 않도록 합니다
 - 기본 스레드풀 크기는 CPU 코어 개수에 기반합니다
 - 동기 함수가 완료되면 결과는 다시 이벤트 루프로 전달됩니다
 
-## f. grpc 이후에 DB i/o 부분은 동기? 비동기?
+## d-6. grpc 이후에 DB i/o 부분은 동기? 비동기?
 
-### f-1. case1) 동기로 구현하는 경우
+### d-6-1. case1) 동기로 구현하는 경우
 
 ```python
 def validate_user(self, user_id):
@@ -573,7 +523,7 @@ def validate_user(self, user_id):
 여기서 2번 부분에서,\
 메인 스레드가 스레드풀한테 task할당할 때 context switching cost가 생긴다.
 
-### f-2. case2) 비동기로 구현하는 경우
+### d-6-2. case2) 비동기로 구현하는 경우
 
 ```python
 async def validate_user(self, user_id):
@@ -597,7 +547,7 @@ async def validate_user(self, user_id):
 2. 컨텍스트 스위칭 오버헤드 없음
 3. 단일 스레드가 여러 요청 효율적으로 처리
 
-### f-3. Q. fastapi에서 동기 / 비동기 성능차이는?
+### d-6-3. Q. fastapi에서 동기 / 비동기 성능차이는?
 
 1. 워커 스레드 오버헤드
 
@@ -614,7 +564,7 @@ async def validate_user(self, user_id):
 - 동기: 요청 수가 스레드풀 크기를 초과하면 큐잉 발생
 - 비동기: 메모리 제약 내에서 훨씬 많은 동시 요청 처리 가능
 
-### f-4. 결론
+### d-6-4. 결론
 
 OLTP 환경에 CRUD app은 비동기가 더 유리
 
@@ -624,7 +574,7 @@ OLTP 환경에 CRUD app은 비동기가 더 유리
 
 게다가 MSA에는 네트워크 통신도 중간에 껴있어서 비동기가 더 유리
 
-### f-5. 기타
+### d-6-5. 기타
 
 ```
 1. order_module.create_order() [?]
@@ -643,18 +593,18 @@ A. 비동기로 해야한다.
 
 
 
-# F. kafka로 이벤트 담아 처리할 때 유실되지 않고 확실하게 처리하는 방법은?
+# E. kafka로 이벤트 담아 처리할 때 유실되지 않고 확실하게 처리하는 방법은?
 
-## a. 비동기 통신과 kafka에 티켓넣고 구독하는 통신과 뭐가 다른거지?
+## e-1. 비동기 통신과 kafka에 티켓넣고 구독하는 통신과 뭐가 다른거지?
 
 1. 비동기 통신은 await로 기다린 다음에, 에러났으면 즉각적으로 rollback 가능하지만, (즉시성이 좋음)
 2. kafka에 티켓넣고 구독하는 방식은 결과적 일관성(eventual consistency)만 보장해서 즉시성이 부족함. 따라서 복구 메커니즘까지 구현 해야 함.
 
 그럼에도 불구하고 pubsub 모델을 쓰는 이유는 MSA에서 각 모듈들을 격리화 해서 에러 전파도 막고 모듈별로 분리해서 개발할 수 있기 때문
 
-## b. 로직을 끝내고 이벤트를 produce 했는데 로직은 commit이 끝났는데 product(event)에러 에러났으면?
+## e-2. 로직을 끝내고 이벤트를 produce 했는데 로직은 commit이 끝났는데 product(event)에러 에러났으면?
 
-### b-1. 일단 재시도 처리를 한다.
+### e-2-1. 일단 재시도 처리를 한다.
 
 그런데, create_order() 중간에 재시도 처리한다고, 1초씩 3번 기다리고 있으면 다른 요청들을 막잖아?
 
@@ -685,19 +635,19 @@ async def _publish_kafka_event(self, topic: str, event: dict) -> None:
         # For example, store failed events in a database for later processing
 ```
 
-### b-2. 재시도마저 실패한다면? -> DLQ
+### e-2-2. 재시도마저 실패한다면? -> DLQ
 
 - dead letter queue란, 메시지 처리하다 에러나면, 버리지 말고, 다르토픽에 저장해 두는 것.
 - 나중에 관리자나 별도 프로세스가 다시 확인해서 재처리함.
 - 실서비스에서 필수라고 한다.
 
-### b-3. 그런데 만약 DLQ도 실패한다면? 어떻게 에러핸들링 해야하지?
+### e-2-3. 그런데 만약 DLQ도 실패한다면? 어떻게 에러핸들링 해야하지?
 
 - 최후에 보루로 db에 저장함.
 - 실패한 이벤트만 들어있는 테이블에 저장함.
 - 그런데 이건 매우 심각한 상황이므로, `logger.critical()`로 에러에 대한 정보까지 같이 기입한다.
 
-### b-4. 백그라운드 스레드가 1시간에 5번씩 실패한 요청들 재시도한다.
+### e-2-4. 백그라운드 스레드가 1시간에 5번씩 실패한 요청들 재시도한다.
 
 - 실패한 이벤트는 최대 5번까지 재시도
 - 각 재시도는 1시간 간격으로 수행
@@ -705,7 +655,7 @@ async def _publish_kafka_event(self, topic: str, event: dict) -> None:
 
 `fastapi_order/app/services/event_retry_service.py` 참조
 
-## c. produce(event)가 중복으로 들어갔다면?
+## e-3. produce(event)가 중복으로 들어갔다면?
 
 ```python
 # order_id를 키로 사용해서 보내기
@@ -782,7 +732,7 @@ acks=0로 설정하면 ACK 기다리지도 않음 (제일 빠름)
 3. 로그 같은 거: acks=0 (속도 우선)
 ```
 
-## d. kafka.send()가 실패했다면?
+## e-4. kafka.send()가 실패했다면?
 A. outbox 패턴을 쓰면 해결된다.
 
 Q. outbox 패턴이 뭐지?
@@ -832,9 +782,9 @@ debezium-config 파일에 설정 추가하면 내부적으로 retry해준다.
 
 
 
-# G. 분산시스템에서의 트랜젝션: kafka편
+# F. 분산시스템에서의 트랜젝션: kafka편
 
-## a. 분산 시스템에서 transaction & rollback을 어떻게 처리하지?
+## f-1. 분산 시스템에서 transaction & rollback을 어떻게 처리하지?
 monolith에서는 재고차감, 주문등록, 결제처리를 하나의 트랜젝션안에 묶고, 실패시 롤백하면 된다.\
 MSA환경에서는 상품,주문,결제 모듈이 쪼개져있는데, 실패시 어떻게 롤백처리 할까?
 
@@ -846,7 +796,7 @@ module B가 rollback 하고, 그걸 kafka에 메시지를 남기면, module A가
 
 중간에 rollback 실패 시, 디버깅 편의성을 위해 retry, DLQ 같은 방식을 섞는다.
 
-## b. 결과
+## f-2. 결과
 상품주문의 비즈니스 플로우와 실패시 SAGA 패턴으로 rollback처리 로직은 다음과 같다.
 
 ```
@@ -920,9 +870,9 @@ sequenceDiagram
 
 
 
-# H. 상품재고의 overselling 문제를 어떻게 해결하지?
+# G. 상품재고의 overselling 문제를 어떻게 해결하지?
 
-## a. overselling 문제
+## g-1. overselling 문제
 상품구매는 이런 식으로 진행된다.
 
 ```
@@ -942,7 +892,7 @@ Q. 그런데 만약 남은 재고량(stock)이 1인데, 유저1,2,3이 동시에
 이 문제를 어떻게 해결할까?
 
 
-## b. solution: 예약 재고 수량 트래킹
+## g-2. solution: 예약 재고 수량 트래킹
 ```
 주문(예약 재고 수량 기입) → 결제 → 예약한 재고수량 만큼 감소 → 배송 ✓
       ↑                ↑       ↑                   ↑
@@ -954,7 +904,7 @@ stock(재고수량) 필드 외에, stock_reserved(예약재고수량) 필드를 
 다른 사람이 같은 상품을 주문하는데, 현재 남아있는 재고량 + 예약된 재고량 이상 주문하려고 하면 주문을 못하게 하는 것이다.
 
 
-## c. 재고량 & 예약재고량을 nosql에서 트래킹하는게 맞을까?
+## g-3. 재고량 & 예약재고량을 nosql에서 트래킹하는게 맞을까?
 
 ecommerce는 read:write 비율이 9:1 이상인 read heavy app이고,\
 대부분 상품 카탈로그 정보 read이다.
@@ -972,7 +922,7 @@ redis vs mongodb 성능비교를 했을 때, 대략적으로 다음과 같다고
 3. Redis 사용 시: 동시 10만 TPS(초당 트랜잭션) 처리 가능한데, MongdoDB는 5000 TPS로 성능차이가 많이 난다고 한다. (기계 스펙, 상황에 따라 천차만별이지만, redis가 더 빠른건 사실)
 
 
-## d. 도입
+## g-4. 도입
 현 프로젝트에서는 간소화 목적으로,\
 재고파악은 별도의 inventory-module + redis에서 하는게 아닌,\
 product-module에서 mysql에서 한다.
@@ -982,9 +932,9 @@ product-module에서 mysql에서 한다.
 redis로 데이터 캐싱해서 최적화 하는 작업은 [여기](https://github.com/Doohwancho/ecommerce?tab=readme-ov-file#b-db-%EB%B6%80%ED%95%98%EB%A5%BC-%EB%82%AE%EC%B6%94%EA%B8%B0-%EC%9C%84%ED%95%9C-cache-%EB%8F%84%EC%9E%85%EA%B8%B0)에서 이미 했기 때문.
 
 
-# I. ecommerce에서 상품의 read optimization
+# H. ecommerce에서 상품의 read optimization
 
-## a. mongodb랑 mysql 모두 b+tree인데 무슨 차이지?
+## h-1. mongodb랑 mysql 모두 b+tree인데 무슨 차이지?
 
 그러니까 mysql은 pk로 정렬한 clustered index(b+Tree이고 leaf node에 pk id 뿐만 아니라 실제 데이터도 있음) + non clustered index(개발자가 임의로 인덱스 부여한 컬럼들이 들어있는 b+tree)라, pk로 검색했다고 치면, leaf node에서 바로 데이터 가져와서 빠른데,
 
@@ -1056,7 +1006,7 @@ mongodb는 인덱스 관리하는 b+tree랑 데이터 관리하는 곳이랑 분
 
 
 
-## b. mongodb의 b+tree와 elastic search에 역인덱스 방식
+## h-2. mongodb의 b+tree와 elastic search에 역인덱스 방식
 mysql는 clutered index라 pk기준으로 정렬된 b+tree에 leaf node에 데이터가 저장되어있어서, 인덱스 찾은 후에 별도로 또 찾을 필요가 없는데,
 mongodb는 pk 인덱스가 정렬된 b+tree의 leaf node에 원본데이터가 없어서 pk 인덱스 b+tree에서 원본 데이터의 주소를 찾은 다음, 또 찾아야 해서 read에 좀 더 불리하다고 한다.
 b+tree의 시간복잡도는 O(logN)인데, 데이터가 100만개면 log(1,000,000) = 20이니까, 20번 비교해야 한다.
@@ -1093,7 +1043,7 @@ Q. 근데 elastic search가 데이터 저장할 때, 키워드 바탕으로 역�
   4. 분석기 최적화
 
 
-## c. mongodb와 elastic search와 sync는 어떻게 하지?
+## h-3. mongodb와 elastic search와 sync는 어떻게 하지?
 monstache라는 라이브러리를 쓰면 mongodb와 elastic search를 실시간으로 sync해준다고 한다.
 
 monstache는 MongoDB의 **Change Streams** 또는 **Oplog**를 실시간으로 추적, 모니터링해 elastic search에 즉시 반영한다. (밀리초 단위 실시간 동기화)
@@ -1103,7 +1053,7 @@ monstache는 MongoDB의 **Change Streams** 또는 **Oplog**를 실시간으�
 
 
 
-## d. 100만건의 상품을 mongodb에서 stress test
+## h-4. 100만건의 상품을 mongodb에서 stress test
 
 ```bash
 cd stress_test
@@ -1164,7 +1114,7 @@ projection을 사용해서 모든 필드를 가져오는게 아닌, 필요한 �
 단순 mongodb와 elatic search에 100만건일 때의 read 성능이 궁금하니까, elastic search도 동일조건에서 테스트 해보자.
 
 
-## e. 100만건의 상품을 elastic search에서 stress test
+## h-5. 100만건의 상품을 elastic search에서 stress test
 ```bash
 # bulk insert를 위한 pip lib 설치
 pip install requests ijson tqdm
@@ -1253,9 +1203,9 @@ latency가 거의 50배 차이나는데 이게 대규모 데이터 다룰 때 �
 read heavy ecommerce app에 상품데이터 읽기 데이터베이스로 손색없는 듯 하다.
 
 
-# J. 상품 검색 방법
+# I. 상품 검색 방법
 
-## a. 전체 순서
+## i-1. 전체 순서
 
 ```mermaid
 flowchart TD
@@ -1305,7 +1255,7 @@ flowchart TD
 8. 필요에 따라 전체 `my_db.products`를 reindex()를 실행시켜서 `products_optimized`에 새롭게 인덱싱된 정보를 덮어씌운다.
   1. 인덱스 구조 변경이나 동의어, 유의어 사전 업데이트 시 전체 reindexing 해야한다.
 
-## b. ES tokenizers 비교
+## i-2. ES tokenizers 비교
 이런 종류의 tokenizer 들이 있다.
 
 1. **Standard 토크나이저**
@@ -1338,7 +1288,7 @@ flowchart TD
     - 오타가 있어도 검색 가능하게 해줌
     - "갤럭시" 대신 "겔럭시" 라고 쳐도 결과 나오게 함
 
-## c. 개별 필드 인덱싱 방법
+## i-3. 개별 필드 인덱싱 방법
 ### case1) brand
 ```json
 "brand": {
@@ -1405,7 +1355,7 @@ flowchart TD
 상품명은 가장 중요한 필드이기 때문에, `text`, `keyword`, `ngram`, `autocomplete` 전부 다 적용한다.
 
 
-## d. 필드 중 검색에 걸릴만한 필드를 하나의 필드로 합쳐서 인덱싱한다.
+## i-4. 필드 중 검색에 걸릴만한 필드를 하나의 필드로 합쳐서 인덱싱한다.
 기본적으로 데이터를 ES에 넣으면 _id 필드를 따로 부여해서 인덱싱 한다.
 
 근데 검색할 때, pid로 검색하는게 아니라, 그 제품의 브랜드라던가, 특징이라던가를 검색어로 넣는데,\
@@ -1419,7 +1369,7 @@ all_text에 모든 정보가 있다고, 다른 중복되는 필드를 버리지�
 
 
 
-## e. 한국어 text analyzer
+## i-5. 한국어 text analyzer
 4줄요약
 - **공식 지원 + 정확도** → **Nori**
 - **AWS 환경 + 문맥 분석** → **Seunjeon**
@@ -1440,7 +1390,7 @@ all_text에 모든 정보가 있다고, 다른 중복되는 필드를 버리지�
 
 
 
-## f. nori - 동의어, 유의어 사전
+## i-6. nori - 동의어, 유의어 사전
 index 만들 때 필터에서 생성한다.
 
 ### case1)유의어 사전
@@ -1483,7 +1433,7 @@ index 만들 때 필터에서 생성한다.
 쿼리 성능과 검색 정확도를 높혀준다.
 
 
-## g. 검색의 방법론
+## i-7. 검색의 방법론
 - all_text에서 일반검색
 - 가중치 검색
   - ex) brand + category + description 이 섞인 검색어가 있으면, 가중치를 brand 5, category 3, description 2를 부여해서 검색하는 방법도 있다.
@@ -1494,34 +1444,32 @@ index 만들 때 필터에서 생성한다.
   - 삼성 -> 삼성전자
 
 
-# K. k8s container의 안정성을 높히는 방법은? (yet)
-## roadmap
-1. 헬스 체크 및 정상 종료 구현(다른 모든 것의 기반이 됨)
-2. HA구성 (가용성 확보 + 단일 장애점 제거): replica set(여러 pod 복제본 유지), load balancing(트래픽을 여러 pod에 분산하여 한 pod가 죽어도 서비스 지속) 설정
-3. open telemetry 표준
-4. loging to beats + elastic search
-5. tracing(jaeger)
-6. istio for circuit breaker, Resilience4J for 복원
-7. stress test -> 장애 복구
+# J. k8s container의 안정성을 높히는 방법은?
+>Q. reliability(안정성)을 높히기 위해 무얼 할 수 있을까?
 
-## a. HA 구성 및 장애 복구
-## a-1. 헬스 체크 및 정상 종료 구현
-1. `GET /health/live`로 컨테이너가 떴는지 확인하고
-2. `GET /health/ready`로 fastapi가 각종 db와 config가 세팅 완료되었는지 확인한다.
-
-이 health check가 컨테이너 복구의 기반이 된다.
-
-### a-2. mongodb HA 및 장애복구 시나리오
-- primary(1 write db), secondary(2 read replica)로 나눠서, CRUD를 R / CUD 따로 처리한다.
-- 자동 fail over 복구는 node를 3개(1 write, 2 read)만들면 자동 처리 된다고 한다.
-- Primary 노드가 실패하면 남은 Secondary 노드들이 자동으로 선거를 진행하여 새로운 Primary를 선출합니다. 이 과정은 일반적으로 몇 초 내에 완료된다.
-- 실패했던 노드가 다시 온라인 상태가 되면, 자동으로 replica set에 다시 합류하고 현재 Primary로부터 데이터를 동기화한 후 Secondary 역할을 다시 수행한다.
-- 중요한 것은 failover가 발생하려면 과반수(majority) 노드가 서로 통신할 수 있어야 합니다. 3개 노드인 경우 최소 2개 노드가 서로 통신할 수 있어야 선거가 진행된다. (이것이 바로 2개 노드만 있을 때 자동 failover가 불가능한 이유)
+## j-1. mysql 
+### j-1-1. HA 
+node가 1개면 db가 죽었을 때, 서버 전체 장애로 퍼지니까,\
+node 3개 (1 master 2 read replica)로 나눈 HA구성한다.
 
 
-#### Q. 쿼럼?
-쿼럼(과반수) 원칙: node가 죽어도 되는데, 어쨌든 살아있는 노드가 전체 노드 갯수의 절반+1(과반수) 이상이어야 한다.
+### j-1-2. 자동 failover 처리
+일단 failover란, mysql pod가 하나 죽었을 때, 재시작 후, master-slave cluster에 re-join 시키는 것이다.\
+reliability 높히는데 매우 중요하다.
 
+처음엔 수동으로 클러스터 생성해서 master/slave node를 수동으로 join 해 보았다.\
+read 요청과 CUD 요청이 나뉘어져서 처리되는 기능은 잘 동작하였으나,\
+문제는 mysql pod가 fail한 후에, k8s가 restart한 후, 기존 클러스터에 자동 re-join시켜주지 않았다.\
+이걸 bash 스크립트로 pod 재시작 시에, cluster 정보 요청 후, 받아와서 어떤 mysql 접속하는 툴을 써서 re-join하는 요청을 날리는데, 안될경우 몇초 시다렸다가 retry 하고...\
+이런걸 해봤는데 잘 안되서 몇일 날렸다. (documents/시행착오/mysql.md 에 대략적 내용 수록함)
+
+찾아보니 InnoDB Cluster & mysql router for k8s setting가 공식문서에 있길래 참고해서 만들었다.\
+이 세팅의 장점은 HA구성에서 pod하나가 죽으면, 나머지 pod끼리 쿼럼(재투표)해서 master를 재선출 하고,\
+죽은 pod가 restart하면 자동으로 cluster.rejoin() 한다는 것이다. 
+
+
+### j-1-3. 쿼럼?
+- 쿼럼(과반수) 원칙: node가 죽어도 되는데, 어쨌든 살아있는 노드가 전체 노드 갯수의 절반+1(과반수) 이상이어야 한다.
 - 예를들어 원래 2개에서 1개 장애나서 1개만 남으면, 기존의 전체 노드 갯수(2)의 과반수 1개 이상이 아니기 때문에 과반수 투표 못함 -> 자동 fail over 장애 조치 못한다.
 - 근데 node 3개면, 1개 장애나도, 남은 2개가 기존 3개의 과반수 이상이기 때문에, 과반수 투표해서 primary / secondary 정해서 자동 fail over 장애 조치 된다.
 - node를 4개로 할 수도 있긴 한데, failover 관점에서는 약간 비효율이다.
@@ -1530,7 +1478,8 @@ index 만들 때 필터에서 생성한다.
   - 반면 node가 5개로 시작하면 2개까지 장애나도 3개가 남아 여전히 과반수 투표하여 자동 fail over 처리 가능하다.
   - 따라서 장애 자동 처리 때문에 노드 갯수는 3,5,7 등 홀수개가 추천된다.
 
-mongodb를 예를 들면, `mongo-stateful-0`에서 replica set을 초기화 한 다음, 상태를 보면,
+---
+ex) mongodb cluster 구성을 잠깐 보면, `mongo-stateful-0`에서 replica set을 초기화 한 다음, 상태를 보면,
 ```json
 rs0 [direct: primary] test> rs.status()
 {
@@ -1551,14 +1500,176 @@ rs0 [direct: primary] test> rs.status()
 replica set에 노드가 3개 있으니까 `votingMembersCount`가 3인걸 확인할 수 있다.
 
 
-### a-3. mysql HA 및 장애복구 시나리오
-- mysql도 mongodb처럼 primary(write), secondary(read) 나눠서 CRUD중에 R는 read_db, CUD는 write_db에 물린다.
-- 과반수 원칙에 따라 노드 갯수는 3이상의 홀수개로 설정한다.
+## j-2. mongodb 
+### j-2-1. HA
+몽고db도 mysql과 마찬가지로 reliability 확보 위해 HA구성한다. 
+
+### j-2-2. mongodb HA 및 장애복구 시나리오
+mysql cluster의 failover와 원리는 같다.\
+mongodb cluster의 failover 처리는 mysql cluster 구성에 비해 비교적 수월했다.
 
 
-### a-4. elastic search HA 및 장애복구 시나리오
+## j-3 opentelemetry
+### j-3-1. why1 - 표준의 중요성1
+개발할 때 머리 깨지는 부분이 "표준을 어떻게 설계하지?" 이다.\
+"표준"이라는건 그 위에 올라오는 것들의 기반이 되기 때문에, 한번 정해지면 나중에 바꾸기도 어렵다.\
+그래서 개발하기 전에 시니어 분들이 모여서 표준부터 잡는다고 알고있다.
 
-### a-5. kafka HA 및 장애복구 시나리오
+당장 '로깅을 어떻게 하지?' 생각 하면서 구글링 해봐도\
+개발자마다, 회사마다 로깅할 때 어떤 정보를 넣는지 디테일들이 조금씩 다르다.\
+로깅 디자인 하는 법같은거 찾아봐도 좋은 내용이긴 한데 서로 하는 말이 조금씩 다르다.
 
-### a-6. zookeeper HA 및 장애복구 시나리오
+회사에서 개발자들끼리 머리 맞대서 로깅 표준 만들었다고 치자.\
+loki 같은걸로 로그수집 한다고 하자.\
+시간이 흘러 loki가 유료화 되었든, 다른 더 좋은걸로 migration 하든,\
+다른 로그 플렛폼으로 바꿨는데 표준이 안맞는다면?
+
+### j-3-2. why2 - 표준의 중요성2  
+백트레이싱으로 jaeger를 쓴다고 치자.\
+jaeger 코드가 app code 사이에 생각보다 많이 들어간다.\
+시간이 흘러서 jaeger -> 다른 툴로 migration 한다고 치자.\
+그러면 app code에 있는 그 많은 jaeger 코드 다 들어내야 한다. 복잡해진다.
+
+반면 open-telemetry를 썼다면 otel.yaml 파일에서 jaeger -> 다른 툴로 바꿔주기만 하면 끝난다.
+
+
+## j-4. jaeger
+### j-4-1. why 
+msa가 여러 모듈로 쪼개져있다보니,\
+create_order() 만 하더라도 `order_module -> user_module & product_module -> payment_module -> order_module -> product_module` 
+
+이렇게 왔다갔다해서, 
+1. latency 측정도 정확히 어느 구간에서 병목이 걸리는지
+2. 에러가 났으면, 저 4모듈중에 정확히 어느 모듈에서 난건지
+
+파악하기 어려운데,\
+이걸 파악시켜주는게 backtracing 기술이고, jaeger는 opensource backtracer이다.
+
+![](./documents/images/jaeger1.png)
+특정 `create_order`요청에 대해서 
+1. latency 분포도 그려주고
+2. 장애난 요청(빨간 점)이 어느 요청인지 알려준다. 
+
+![](./documents/images/jaeger2.png)
+1. 각 구간별로 latency가 얼마나 걸렸는지 확인할 수 있다.
+2. 왼쪽 빨간색 느낌표가 장애난 부분이다. 
+
+![](./documents/images/jaeger3.png)
+3. 장애난 부분을 클릭해보면, 에러로그까지 확인할 수 있다. 
+
+
+### j-4-2. context propagate
+![](./documents/images/jaeger2.png)
+
+create_order()이 여러 모듈과 통신한다고 했는데, 막상 보면, `fastapi-order-service`밖에 보이지 않는다. 
+
+왜냐?
+
+module을 넘나들 때, context 정보를 넘겨줘야 하기 때문이다.
+
+이 부분이 grpc통신처럼 바로 왔다갔다하는 통신이면 그나마 괜찮은데,\
+`order module -> mysql.outbox table -> debezium CDC -> kafka -> payment module`\
+이런 식으로 비동기식 통신은 약간의 공식문서와의 씨름이 필요하다.
+
+컨텍스트 정보를 잘넘겨주면, jaeger-ui가 다른 모듈들의 트레이싱 정보도 포함해서 보여주게 된다.
+
+![](./documents/images/jaeger6.png)
+`create_order()`안에 payment부분과 product 부분의 트레이스도 확인 가능하다.
+
+![](./documents/images/jaeger7.png)
+트레이스를 열어보면 세부정보도 확인할 수 있다.
+
+![](./documents/images/jaeger8.png)
+일부러 `create_order()`에 에러를 발생시키고
+
+![](./documents/images/jaeger9.png)
+에러 트레이스를 읽는 장면이다.
+
+
+### j-4-3. debug
+![](./documents/images/jaeger4-clock_skew.png)
+
+module_a -> module_b로 context를 넘겨줄 때, id같은걸 공유하는데,\
+jaeger가 트레이싱 정보를 재조합 하는 과정에서, id가 맞아도, 각자 트레이싱 정보의 시간이 너무나도 많이 차이나면, 이렇게 'time skew' warning을 뱉을 때가 있다. 
+
+나의 경우엔...
+![](./documents/images/resouce_is_full.png)
+pod를 너무 많이 돌린게 원인...\
+컴퓨터는 좋은걸 쓰자..
+
+현재는 jaeger.yaml 설정에 트레이싱들의 시차가 크게 차이나도 무시하고 진행해줘! 라고 설정되 있는 상태이긴 하다.\
+근데 시차 차이가 너무 나면, jaeger-ui상에서 분리된 모듈간 사이간격이 너무 떨어져있게 보여서(눈으로는) 약간 안이쁘긴 하다.
+
+## j-5. resilience
+### j-5-1. why 
+msa에서 분리된 모듈중 하나가 장애가나면,\
+그 모듈에 요청한 모듈이 무제한으로 기다리다가 트레픽 부하로 터지면, 연쇄적으로 다른 모듈들까지 장애가 전파되는 불상사가 생길 수 있다.
+
+모듈끼리 통신할 땐, 
+1. retry 몇번할껀지
+2. 몇초 기다렸다 timeout처리 할건지 
+3. 부하가 몰리면 퓨즈 내려버리는 circuitbreaker 
+...을 미리 설정해둬야 분산시스템에서 장애전파를 방지할 수 있다.
+
+### j-5-2. library 선택 기준
+1. stars 수가 500이상에
+2. 최근 반년 안에 maintained된 코드여야 한다.
+
+### j-5-3. istio + envoy로 구현?
+현업에서는 retry / timeout / circuit breaker 기능을 library보다는 istio + envoy로 구현한다고 한다.
+
+왜냐하면
+1. app code를 더럽히지 않고 인프라 레벨에서 기능 구현
+2. circuit breaker의 경우 상태 정보라던지가 데이터로 남아 prometheus + grafana로 시각화 가능
+
+그런데 문제는 istio & envoy가 조금 복잡하기도 하고,\
+리소스를 많이 잡아먹는다고 한다.
+
+![](./documents/images/resouce_is_full.png)
+
+다음기회에...
+
+
+### j-5-4. 자동복구
+
+#### j-5-4-1. 헬스 체크 및 정상 종료 구현
+1. `GET /health/live`로 컨테이너가 떴는지 확인하고
+2. `GET /health/ready`로 fastapi가 각종 db와 연결 되었는지, config가 세팅 완료되었는지 확인한다.
+
+이 health check가 컨테이너 복구의 기반이 된다.
+
+이렇게 설정해놓으면, pod가 죽었을 때 k8s가 이 기능을 바탕으로 pod 재시작해준다.
+
+## j-6. logging
+
+### j-6-1. problem 
+로깅 표준은 open telemetry로 맞췄는데,\
+어디에 로그를 저장을 해야 잘 저장했다고 소문날까?
+
+레거시 로깅 시스템 개선기같은 글을 보면, 쌓이는 양이 엄청 커서,\
+나중에 크기가 어마어마해지면, 로그 query 한번에 10분이상씩 걸린다고 하더라.
+
+### j-6-2. 해결책
+위 요소를 고려했을 때,\
+msa같이 잘게 쪼개놓으면 모듈별로 로그가 엄청 나올거고,\
+ecommerce domain이라면 특히 payment관련 로그같은걸 query해볼 일이 자주 있을텐데,\
+로깅 쿼리 속도가 중요하지 않을까?\
+...라는 생각이 들어서 ELK 스택을 선택했다.(otel -> elatic search -> kibana)
+
+![](documents/images/elastic_search-log-1.png)
+
+### j-6-3. 개선점 
+막상 ecommerce platform인 배민의 로깅 개선기를 봤는데,\
+ELK에서 단기 log는 loki에, 장기 log는 s3에 보관하도록 바꾸었더니,\
+서버비가 약 20%정도 줄었다고 했다.
+
+로키가 elastic search보다 full text 기반 query가 느리다곤 하나,\
+어짜피 장기로그 보는 경우는 드물고,\
+단기 로그 위주만 보는게 대부분이니까,\
+elastic search보다 loki를 쓰는게 더 괜찮지 않나? 
+
+지금 생각배보면 loki의 쿼리속도가 조금 느릴지언정\
+어짜피 쌓인 단기로그가 얼마 안될것이기 때문에,\
+더 저렴한 loki 쓰는게 맞지 않나? 라는 생각이 든다.\
+배민급 회사에서 23%의 서버비 절약은 꽤나 클 것이기 때문에...
 
