@@ -27,7 +27,7 @@ basic ecommerce MSA
     2. 로직을 끝내고 이벤트를 produce 했는데 로직은 commit이 끝났는데 product(event)에러 에러났으면?
     3. produce(event)가 중복으로 들어갔다면?
     4. kafka.send()가 실패했다면?
-5. [Q. 분산 시스템에서 트랜젝션 방법은?](#f-분산시스템에서의-트랜젝션r-kafka편)
+5. [Q. 분산 시스템에서 트랜젝션 방법은?](#f-분산시스템에서의-트랜젝션-kafka편)
     1. 분산 시스템에서 transaction & rollback을 어떻게 처리하지?
     2. 결과 (mermaid flowchart)
 6. [Q. 상품재고의 overselling 문제를 어떻게 해결하지?](#g-상품재고의-overselling-문제를-어떻게-해결하지)
