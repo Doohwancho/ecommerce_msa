@@ -9,12 +9,12 @@
 
 | 구분 | 주제 | 적용 기술 및 해결책 |
 | :--- | :--- | :--- |
-| 💾 **데이터** | [대용량 데이터 저장 및 검색 전략](#a-데이터-저장-전략) | **Polyglot Persistence**: MongoDB (원본), Elasticsearch (검색/분석) |
-| 🔄 **일관성** | [분산 트랜잭션 처리](#c-분산-트랜잭션-saga--outbox-패턴) | **SAGA 패턴** with Kafka & Debezium |
-| ⚡️ **성능** | [실시간 재고 관리 (Overselling 방지)](#c-분산-트랜잭션-saga--outbox-패턴) | **예약 재고 (Reserved Stock)** 패턴 적용 |
-| 💬 **통신** | [서비스 간 효율적인 통신](#b-msa-통신-방식) | **gRPC** (내부 동기 통신), **Kafka** (비동기 이벤트) |
-| 🔍 **검색** | [한국어 검색 품질 향상](#d-읽기검색-성능-최적화) | **Elasticsearch**, Nori 형태소 분석기, 동의어/유의어 사전 |
-| 🛡️ **안정성** | [시스템 안정성 및 자동 복구](#e-시스템-안정성-및-관측-가능성-reliability--observability) | **K8s 기반 HA 구성**, **Jaeger** (분산 추적), **Resilience** 패턴 |
+| **데이터** | [대용량 데이터 저장 및 검색 전략](#a-데이터-저장-전략) | **Polyglot Persistence**: MongoDB (원본), Elasticsearch (검색/분석) |
+| **일관성** | [분산 트랜잭션 처리](#c-분산-트랜잭션-saga--outbox-패턴) | **SAGA 패턴** with Kafka & Debezium |
+| ️**성능** | [실시간 재고 관리 (Overselling 방지)](#c-분산-트랜잭션-saga--outbox-패턴) | **예약 재고 (Reserved Stock)** 패턴 적용 |
+| **통신** | [서비스 간 효율적인 통신](#b-msa-통신-방식) | **gRPC** (내부 동기 통신), **Kafka** (비동기 이벤트) |
+| **검색** | [한국어 검색 품질 향상](#d-읽기검색-성능-최적화) | **Elasticsearch**, Nori 형태소 분석기, 동의어/유의어 사전 |
+| ️**안정성** | [시스템 안정성 및 자동 복구](#e-시스템-안정성-및-관측-가능성-reliability--observability) | **K8s 기반 HA 구성**, **Jaeger** (분산 추적), **Resilience** 패턴 |
 
 
 ## c. tech stacks
