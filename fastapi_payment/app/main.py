@@ -14,6 +14,8 @@ from sqlalchemy import text
 import os
 from app.config.payment_logging import initialize_logging_and_telemetry, get_configured_logger
 
+from prometheus_fastapi_instrumentator import Instrumentator 
+
 import logging
 
 # Call setup_logging() to configure logging for the application
@@ -110,6 +112,10 @@ app = FastAPI(
 #     allow_methods=["*"],
 #     allow_headers=["*"],
 # )
+
+# prometheus config
+Instrumentator().instrument(app).expose(app)
+
 
 # API 라우터 등록
 app.include_router(api_router, prefix="/api")

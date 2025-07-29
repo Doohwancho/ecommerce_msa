@@ -18,3 +18,6 @@ opentelemetry-semantic-conventions==0.42b0
 opentelemetry-instrumentation-grpc==0.42b0
 opentelemetry-instrumentation-pymongo==0.42b0
 opentelemetry-instrumentation-logging 
+
+prometheus-fastapi-instrumentator==6.1.0
+prometheus-client==0.20.0

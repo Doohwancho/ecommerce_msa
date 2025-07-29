@@ -27,6 +27,9 @@ from app.models.order import Order, OrderItem, OrderStatus
 from app.models.failed_event import FailedEvent
 from app.models.outbox import Outbox
 
+# prometheus
+from prometheus_fastapi_instrumentator import Instrumentator 
+
 # --- 1. 로깅 및 OpenTelemetry 핵심 설정 초기화 ---
 # 애플리케이션 시작 시 가장 먼저 호출되어야 함!
 initialize_logging_and_telemetry()
@@ -107,6 +110,10 @@ async def lifespan(app_instance: FastAPI): # app_instance 이름 변경 (FastAPI
 # --- FastAPI 애플리케이션 생성 ---
 # lifespan 컨텍스트 매니저를 FastAPI 앱에 연결
 app = FastAPI(title="Order Service API", lifespan=lifespan)
+
+# prometheus config
+Instrumentator().instrument(app).expose(app)
+
 
 # --- FastAPI 앱 OpenTelemetry 계측 ---
 # 로깅, Provider, 기타 계측 설정이 모두 완료된 후 마지막에 호출

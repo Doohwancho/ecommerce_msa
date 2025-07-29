@@ -1,4 +1,4 @@
-# 그냥 prometheus vs opentelemetry -> prometheus
+# A. 그냥 prometheus vs opentelemetry -> prometheus
 
 ## 1. 초기생각: 로깅, 백트레이싱도 opentelemetry 거쳤으니까, apm도 open telemetry 거치는게 좋지 않을까?
 
@@ -118,3 +118,24 @@ msa니까 observability를 위해 추후 istio metrics도 모니터링 한다고
 ### 3-2. APM은 opentelemetry 거치지 않고 바로 prometheus + grafana 쓰기
 
 이게 편한 길인 듯 싶다.
+
+# B. k8s에서 prometheus + grafana로 APM하기
+
+```bash
+kubectl apply -f k8_configs/kube-state-metrics.yaml
+kubectl apply -f k8_configs/prometheus-rbac.yaml
+kubectl apply -f k8_configs/prometheus-configmap.yaml
+kubectl apply -f k8_configs/prometheus-deployment.yaml
+
+kubectl port-forward prometheus-64bcdcb847-6lwqh 9090:9090
+http://localhost:9090/
+
+kubectl apply -f k8_configs/grafana.yaml
+kubectl port-forward svc/grafana 3000:3000
+http://localhost:3000
+```
+
+1. admin admin 로그인 후 왼쪽 메뉴의 Connections → Data sources로 이동하면,
+2. 이미 추가된 default prometheus datasource 사용하지 말고, 새로 datasource -> prometheus -> 서버 url에
+   http://prometheus-service:9090 입력
+3. 전체 k8s cluster 모니터링용은 id: 15661

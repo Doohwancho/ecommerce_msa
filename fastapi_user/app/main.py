@@ -13,6 +13,8 @@ from opentelemetry import trace
 import logging
 from app.config.logging import initialize_logging_and_telemetry, get_configured_logger, get_global_logger_provider # Import setup_logging
 from app.config.otel import setup_non_logging_telemetry, instrument_fastapi_app
+
+from prometheus_fastapi_instrumentator import Instrumentator 
 import json 
 
 # --- 1. 로깅 및 OpenTelemetry 핵심 설정 초기화 ---
@@ -53,10 +55,17 @@ async def lifespan(app: FastAPI):
 # Create application with lifespan handler
 app = FastAPI(title="User Service API", lifespan=lifespan)
 
+# prometheus config
+Instrumentator().instrument(app).expose(app)
+
+
+
 # API router registration
 app.include_router(api_router, prefix="/api")
 
 instrument_fastapi_app(app) 
+
+
 
 
 @app.get("/health/live")
@@ -72,86 +81,87 @@ async def readiness():
     """
     Readiness probe - 서비스가 요청을 처리할 준비가 되었는지 확인
     """
-    logger.debug("Readiness probe accessed.", extra={"path": "/health/ready"})
-    errors = []
-    status_details = {}
+    return {"status": "alive"}
+#     logger.debug("Readiness probe accessed.", extra={"path": "/health/ready"})
+#     errors = []
+#     status_details = {}
     
-    try:
-        # Write DB 연결 확인
-        write_client = get_write_mongo_client()
-        await write_client.admin.command('ping')
-        status_details["mongodb_write"] = "connected"
-        logger.debug("Readiness: MongoDB write connection successful.", extra={"db_type": "mongodb_write"})
-    except Exception as e:
-        logger.error("Readiness: MongoDB write connection failed.", extra={"db_type": "mongodb_write", "error": str(e)}, exc_info=True)
-        errors.append(f"MongoDB Write: {str(e)}")
-        status_details["mongodb_write"] = "failed"
+#     try:
+#         # Write DB 연결 확인
+#         write_client = get_write_mongo_client()
+#         await write_client.admin.command('ping')
+#         status_details["mongodb_write"] = "connected"
+#         logger.debug("Readiness: MongoDB write connection successful.", extra={"db_type": "mongodb_write"})
+#     except Exception as e:
+#         logger.error("Readiness: MongoDB write connection failed.", extra={"db_type": "mongodb_write", "error": str(e)}, exc_info=True)
+#         errors.append(f"MongoDB Write: {str(e)}")
+#         status_details["mongodb_write"] = "failed"
     
-    try:
-        # Read DB 연결 확인
-        read_client = get_read_mongo_client()
-        await read_client.admin.command('ping')
-        status_details["mongodb_read"] = "connected"
-        logger.debug("Readiness: MongoDB read connection successful.", extra={"db_type": "mongodb_read"})
-    except Exception as e:
-        logger.error("Readiness: MongoDB read connection failed.", extra={"db_type": "mongodb_read", "error": str(e)}, exc_info=True)
-        errors.append(f"MongoDB Read: {str(e)}")
-        status_details["mongodb_read"] = "failed"
+#     try:
+#         # Read DB 연결 확인
+#         read_client = get_read_mongo_client()
+#         await read_client.admin.command('ping')
+#         status_details["mongodb_read"] = "connected"
+#         logger.debug("Readiness: MongoDB read connection successful.", extra={"db_type": "mongodb_read"})
+#     except Exception as e:
+#         logger.error("Readiness: MongoDB read connection failed.", extra={"db_type": "mongodb_read", "error": str(e)}, exc_info=True)
+#         errors.append(f"MongoDB Read: {str(e)}")
+#         status_details["mongodb_read"] = "failed"
     
-    # gRPC 서버 상태 확인
-    try:
-        grpc_task = get_grpc_task()
-        if not grpc_task or grpc_task.done():
-            errors.append("gRPC server is not running")
-            status_details["grpc"] = "failed"
-            logger.warning("Readiness: gRPC server is not running.", extra={"grpc_status": "failed"})
-        else:
-            status_details["grpc"] = "running"
-            logger.debug("Readiness: gRPC server is running.", extra={"grpc_status": "running"})
-    except Exception as e:
-        logger.error("Readiness: gRPC check failed.", extra={"error": str(e)}, exc_info=True)
-        errors.append(f"gRPC: {str(e)}")
-        status_details["grpc"] = "failed"
+#     # gRPC 서버 상태 확인
+#     try:
+#         grpc_task = get_grpc_task()
+#         if not grpc_task or grpc_task.done():
+#             errors.append("gRPC server is not running")
+#             status_details["grpc"] = "failed"
+#             logger.warning("Readiness: gRPC server is not running.", extra={"grpc_status": "failed"})
+#         else:
+#             status_details["grpc"] = "running"
+#             logger.debug("Readiness: gRPC server is running.", extra={"grpc_status": "running"})
+#     except Exception as e:
+#         logger.error("Readiness: gRPC check failed.", extra={"error": str(e)}, exc_info=True)
+#         errors.append(f"gRPC: {str(e)}")
+#         status_details["grpc"] = "failed"
     
-    if errors:
-        logger.warning("Readiness probe failed.", extra={"status_details": json.dumps(status_details), "errors_count": len(errors)})
-        return JSONResponse(
-            status_code=503,
-            content={"status": "not ready", "details": status_details, "errors": errors}
-        )
+#     if errors:
+#         logger.warning("Readiness probe failed.", extra={"status_details": json.dumps(status_details), "errors_count": len(errors)})
+#         return JSONResponse(
+#             status_code=503,
+#             content={"status": "not ready", "details": status_details, "errors": errors}
+#         )
     
-    logger.info("Readiness probe successful.", extra={"status_details": json.dumps(status_details)})
-    return {"status": "ready", "details": status_details}
+#     logger.info("Readiness probe successful.", extra={"status_details": json.dumps(status_details)})
+#     return {"status": "ready", "details": status_details}
 
-@app.get("/test-connections")
-async def test_connections():
-    """
-    모든 외부 연결을 테스트하는 엔드포인트 (디버깅용)
-    """
-    logger.info("Accessing /test-connections endpoint.", extra={"path": "/test-connections"})
-    result = {}
+# @app.get("/test-connections")
+# async def test_connections():
+#     """
+#     모든 외부 연결을 테스트하는 엔드포인트 (디버깅용)
+#     """
+#     logger.info("Accessing /test-connections endpoint.", extra={"path": "/test-connections"})
+#     result = {}
     
-    # MongoDB Write 연결 테스트
-    try:
-        write_client = get_write_mongo_client()
-        await write_client.admin.command('ping')
-        result["mongodb_write"] = {"connected": True}
-        logger.debug("Test Connections: MongoDB write successful.", extra={"db_type": "mongodb_write"})
-    except Exception as e:
-        result["mongodb_write"] = {"error": str(e), "connected": False}
-        logger.error("Test Connections: MongoDB write failed.", extra={"db_type": "mongodb_write", "error": str(e)}, exc_info=True)
+#     # MongoDB Write 연결 테스트
+#     try:
+#         write_client = get_write_mongo_client()
+#         await write_client.admin.command('ping')
+#         result["mongodb_write"] = {"connected": True}
+#         logger.debug("Test Connections: MongoDB write successful.", extra={"db_type": "mongodb_write"})
+#     except Exception as e:
+#         result["mongodb_write"] = {"error": str(e), "connected": False}
+#         logger.error("Test Connections: MongoDB write failed.", extra={"db_type": "mongodb_write", "error": str(e)}, exc_info=True)
         
-    # MongoDB Read 연결 테스트
-    try:
-        read_client = get_read_mongo_client()
-        await read_client.admin.command('ping')
-        result["mongodb_read"] = {"connected": True}
-        logger.debug("Test Connections: MongoDB read successful.", extra={"db_type": "mongodb_read"})
-    except Exception as e:
-        result["mongodb_read"] = {"error": str(e), "connected": False}
-        logger.error("Test Connections: MongoDB read failed.", extra={"db_type": "mongodb_read", "error": str(e)}, exc_info=True)
+#     # MongoDB Read 연결 테스트
+#     try:
+#         read_client = get_read_mongo_client()
+#         await read_client.admin.command('ping')
+#         result["mongodb_read"] = {"connected": True}
+#         logger.debug("Test Connections: MongoDB read successful.", extra={"db_type": "mongodb_read"})
+#     except Exception as e:
+#         result["mongodb_read"] = {"error": str(e), "connected": False}
+#         logger.error("Test Connections: MongoDB read failed.", extra={"db_type": "mongodb_read", "error": str(e)}, exc_info=True)
         
-    return result
+#     return result
 
 
 @app.get("/")

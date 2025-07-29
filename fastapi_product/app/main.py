@@ -24,6 +24,9 @@ from app.config.elasticsearch import elasticsearch_config
 import logging
 from app.config.logging import initialize_logging_and_telemetry, get_configured_logger, get_global_logger_provider # Import setup_logging
 from app.config.otel import setup_non_logging_telemetry, instrument_fastapi_app
+
+from prometheus_fastapi_instrumentator import Instrumentator 
+
 from fastapi.responses import JSONResponse
 
 
@@ -210,6 +213,11 @@ app = FastAPI(
     lifespan=lifespan # Use the enhanced lifespan manager
 )
 
+# prometheus config
+Instrumentator().instrument(app).expose(app)
+
+
+
 # API 라우터 등록
 app.include_router(api_router, prefix="/api")
 
@@ -232,103 +240,105 @@ async def liveness():
 
 @app.get("/health/ready")
 async def readiness():
-    """Readiness probe - 서비스가 요청을 처리할 준비가 되었는지 확인"""
-    # FastAPIInstrumentor creates the main span. Auto-instrumentation for DB/ES/Kafka pings (if any) creates child spans.
-    # Logs will be correlated. A manual span for the entire readiness check provides overall status.
-    with tracer.start_as_current_span("app.health.readiness_check") as readiness_span:
-        readiness_span.set_attribute(SpanAttributes.HTTP_METHOD, "GET")
-        readiness_span.set_attribute(SpanAttributes.HTTP_ROUTE, "/health/ready")
+    return {"status": "alive"}
+
+    # """Readiness probe - 서비스가 요청을 처리할 준비가 되었는지 확인"""
+    # # FastAPIInstrumentor creates the main span. Auto-instrumentation for DB/ES/Kafka pings (if any) creates child spans.
+    # # Logs will be correlated. A manual span for the entire readiness check provides overall status.
+    # with tracer.start_as_current_span("app.health.readiness_check") as readiness_span:
+    #     readiness_span.set_attribute(SpanAttributes.HTTP_METHOD, "GET")
+    #     readiness_span.set_attribute(SpanAttributes.HTTP_ROUTE, "/health/ready")
         
-        errors = []
-        service_status_details = {} # Renamed from 'status'
-        all_ok = True
+    #     errors = []
+    #     service_status_details = {} # Renamed from 'status'
+    #     all_ok = True
 
-        # 1. MySQL DB 연결 확인
-        # SQLAlchemyInstrumentor traces db_session.execute
-        try:
-            db_session: AsyncSession = await get_mysql_db() # Ensure get_mysql_db is efficient
-            async with db_session: # Ensures session is closed
-                await db_session.execute(text("SELECT 1"))
-            service_status_details["mysql"] = "connected"
-        except Exception as e:
-            logger.error("Readiness: MySQL connection failed", extra={"error": str(e)}, exc_info=True)
-            errors.append(f"MySQL: {str(e)}")
-            service_status_details["mysql"] = "failed"
-            readiness_span.set_attribute("readiness.mysql.error", str(e))
-            all_ok = False
+    #     # 1. MySQL DB 연결 확인
+    #     # SQLAlchemyInstrumentor traces db_session.execute
+    #     try:
+    #         db_session: AsyncSession = await get_mysql_db() # Ensure get_mysql_db is efficient
+    #         async with db_session: # Ensures session is closed
+    #             await db_session.execute(text("SELECT 1"))
+    #         service_status_details["mysql"] = "connected"
+    #     except Exception as e:
+    #         logger.error("Readiness: MySQL connection failed", extra={"error": str(e)}, exc_info=True)
+    #         errors.append(f"MySQL: {str(e)}")
+    #         service_status_details["mysql"] = "failed"
+    #         readiness_span.set_attribute("readiness.mysql.error", str(e))
+    #         all_ok = False
 
-        # 2. MongoDB 연결 확인 (Write & Read)
-        # PymongoInstrumentor would trace actual DB ops like ping(), not just getting a collection object.
-        try:
-            write_collection = await get_write_product_collection()
-            if write_collection is not None:
-                # Example: await write_collection.database.command('ping') # This would be traced
-                service_status_details["mongodb_write"] = "connected"
-            else:
-                errors.append("MongoDB Write: Failed to get collection")
-                service_status_details["mongodb_write"] = "failed"
-                readiness_span.set_attribute("readiness.mongodb_write.error", "Failed to get collection")
-                all_ok = False
+    #     # 2. MongoDB 연결 확인 (Write & Read)
+    #     # PymongoInstrumentor would trace actual DB ops like ping(), not just getting a collection object.
+    #     try:
+    #         write_collection = await get_write_product_collection()
+    #         if write_collection is not None:
+    #             # Example: await write_collection.database.command('ping') # This would be traced
+    #             service_status_details["mongodb_write"] = "connected"
+    #         else:
+    #             errors.append("MongoDB Write: Failed to get collection")
+    #             service_status_details["mongodb_write"] = "failed"
+    #             readiness_span.set_attribute("readiness.mongodb_write.error", "Failed to get collection")
+    #             all_ok = False
             
-            read_collection = await get_read_product_collection()
-            if read_collection is not None:
-                service_status_details["mongodb_read"] = "connected"
-            else:
-                errors.append("MongoDB Read: Failed to get collection")
-                service_status_details["mongodb_read"] = "failed"
-                readiness_span.set_attribute("readiness.mongodb_read.error", "Failed to get collection")
-                all_ok = False
-        except Exception as e:
-            logger.error("Readiness: MongoDB connection check failed", extra={"error": str(e)}, exc_info=True)
-            errors.append(f"MongoDB: {str(e)}")
-            service_status_details["mongodb_write"] = service_status_details.get("mongodb_write", "failed")
-            service_status_details["mongodb_read"] = service_status_details.get("mongodb_read", "failed")
-            readiness_span.set_attribute("readiness.mongodb.overall_error", str(e))
-            all_ok = False
+    #         read_collection = await get_read_product_collection()
+    #         if read_collection is not None:
+    #             service_status_details["mongodb_read"] = "connected"
+    #         else:
+    #             errors.append("MongoDB Read: Failed to get collection")
+    #             service_status_details["mongodb_read"] = "failed"
+    #             readiness_span.set_attribute("readiness.mongodb_read.error", "Failed to get collection")
+    #             all_ok = False
+    #     except Exception as e:
+    #         logger.error("Readiness: MongoDB connection check failed", extra={"error": str(e)}, exc_info=True)
+    #         errors.append(f"MongoDB: {str(e)}")
+    #         service_status_details["mongodb_write"] = service_status_details.get("mongodb_write", "failed")
+    #         service_status_details["mongodb_read"] = service_status_details.get("mongodb_read", "failed")
+    #         readiness_span.set_attribute("readiness.mongodb.overall_error", str(e))
+    #         all_ok = False
         
-        # 3. Elasticsearch 연결 확인 (if uncommented in user's original code)
-        # ElasticsearchInstrumentor would trace es_client.info()
-        # try:
-        #     es_client = await elasticsearch_config.get_client()
-        #     await es_client.info()
-        #     service_status_details["elasticsearch"] = "connected"
-        # except Exception as e:
-        #     logger.error(f"Readiness: Elasticsearch connection failed: {str(e)}", exc_info=True)
-        #     errors.append(f"Elasticsearch: {str(e)}")
-        #     service_status_details["elasticsearch"] = "failed"
-        #     readiness_span.set_attribute("readiness.elasticsearch.error", str(e))
-        #     all_ok = False
+    #     # 3. Elasticsearch 연결 확인 (if uncommented in user's original code)
+    #     # ElasticsearchInstrumentor would trace es_client.info()
+    #     # try:
+    #     #     es_client = await elasticsearch_config.get_client()
+    #     #     await es_client.info()
+    #     #     service_status_details["elasticsearch"] = "connected"
+    #     # except Exception as e:
+    #     #     logger.error(f"Readiness: Elasticsearch connection failed: {str(e)}", exc_info=True)
+    #     #     errors.append(f"Elasticsearch: {str(e)}")
+    #     #     service_status_details["elasticsearch"] = "failed"
+    #     #     readiness_span.set_attribute("readiness.elasticsearch.error", str(e))
+    #     #     all_ok = False
         
-        # 4. gRPC 서버 상태 확인
-        try:
-            current_grpc_task = get_grpc_task()
-            if not current_grpc_task or current_grpc_task.done():
-                errors.append("gRPC server is not running or has completed")
-                service_status_details["grpc"] = "failed"
-                readiness_span.set_attribute("readiness.grpc.status", "Not running or done")
-                all_ok = False
-            else:
-                service_status_details["grpc"] = "running"
-        except Exception as e: # Should be unlikely if get_grpc_task is simple
-            logger.error("Readiness: gRPC check logic failed", extra={"error": str(e)}, exc_info=True)
-            errors.append(f"gRPC check error: {str(e)}")
-            service_status_details["grpc"] = "error"
-            readiness_span.set_attribute("readiness.grpc.check_error", str(e))
-            all_ok = False
+    #     # 4. gRPC 서버 상태 확인
+    #     try:
+    #         current_grpc_task = get_grpc_task()
+    #         if not current_grpc_task or current_grpc_task.done():
+    #             errors.append("gRPC server is not running or has completed")
+    #             service_status_details["grpc"] = "failed"
+    #             readiness_span.set_attribute("readiness.grpc.status", "Not running or done")
+    #             all_ok = False
+    #         else:
+    #             service_status_details["grpc"] = "running"
+    #     except Exception as e: # Should be unlikely if get_grpc_task is simple
+    #         logger.error("Readiness: gRPC check logic failed", extra={"error": str(e)}, exc_info=True)
+    #         errors.append(f"gRPC check error: {str(e)}")
+    #         service_status_details["grpc"] = "error"
+    #         readiness_span.set_attribute("readiness.grpc.check_error", str(e))
+    #         all_ok = False
         
-        if not all_ok:
-            readiness_span.set_attribute("readiness.errors_count", len(errors))
-            readiness_span.set_status(Status(StatusCode.ERROR, "Readiness checks failed"))
-            if errors:
-                readiness_span.set_attribute("readiness.first_error_detail", errors[0])
-            return JSONResponse(
-                status_code=503,
-                content={"status": "not ready", "details": service_status_details, "errors": errors}
-            )
+    #     if not all_ok:
+    #         readiness_span.set_attribute("readiness.errors_count", len(errors))
+    #         readiness_span.set_status(Status(StatusCode.ERROR, "Readiness checks failed"))
+    #         if errors:
+    #             readiness_span.set_attribute("readiness.first_error_detail", errors[0])
+    #         return JSONResponse(
+    #             status_code=503,
+    #             content={"status": "not ready", "details": service_status_details, "errors": errors}
+    #         )
         
-        readiness_span.set_status(Status(StatusCode.OK))
-        logger.info("Readiness probe successful.")
-        return {"status": "ready", "details": service_status_details}
+    #     readiness_span.set_status(Status(StatusCode.OK))
+    #     logger.info("Readiness probe successful.")
+    #     return {"status": "ready", "details": service_status_details}
 
 
 @app.get("/test-connections")

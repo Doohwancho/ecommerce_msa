@@ -30,3 +30,6 @@ opentelemetry-instrumentation-sqlalchemy==0.54b0
 opentelemetry-instrumentation-aiokafka~=0.54b0 
 opentelemetry-instrumentation-elasticsearch==0.54b0
 opentelemetry-instrumentation-logging==0.54b0
+
+prometheus-fastapi-instrumentator==6.1.0
+prometheus-client==0.20.0

@@ -13,9 +13,13 @@ spec:
     metadata:
       labels:
         app: product-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8000"
     spec:
       containers:
-        - name: product-service-container
+        - name: product-service
           image: doohwancho/fastapi-product-service:latest
           imagePullPolicy: Always
           ports:
@@ -24,7 +28,7 @@ spec:
             - name: grpc
               containerPort: 50051
           env:
-            # mongodb   
+            # mongodb
             - name: MONGODB_HOST
               value: "mongodb-stateful-0.mongodb-service,mongodb-stateful-1.mongodb-service, mongodb-stateful-2.mongodb-service"
             - name: MONGODB_REPLICA_SET
@@ -41,13 +45,13 @@ spec:
                 secretKeyRef:
                   name: mongodb-secret
                   key: mongo-root-password
-            
-            # mysql 
-            - name: MYSQL_ROUTER_HOST   
-              value: "mycluster" 
-            - name: MYSQL_ROUTER_RW_PORT  
-              value: "6446"         
-            - name: MYSQL_ROUTER_RO_PORT  
+
+            # mysql
+            - name: MYSQL_ROUTER_HOST
+              value: "mycluster"
+            - name: MYSQL_ROUTER_RW_PORT
+              value: "6446"
+            - name: MYSQL_ROUTER_RO_PORT
               value: "6447"
             - name: MYSQL_PORT
               value: "3306"
@@ -61,12 +65,12 @@ spec:
             - name: MYSQL_DATABASE
               valueFrom:
                 secretKeyRef:
-                  name: mysql-secret 
+                  name: mysql-secret
                   key: mysql-database
             - name: MYSQL_HOST
               value: "mysql-service"
 
-            # kafka  
+            # kafka
             - name: KAFKA_BOOTSTRAP_SERVERS
               valueFrom:
                 configMapKeyRef:
