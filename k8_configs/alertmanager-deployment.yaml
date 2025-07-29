@@ -1,0 +1,37 @@
+# ===================================================================
+# 2. Alertmanager 배포 (Deployment)
+# ===================================================================
+### NEW ###
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.25.0
+          args:
+            - "--config.file=/etc/alertmanager/alertmanager.yml"
+            - "--storage.path=/alertmanager"
+          ports:
+            - containerPort: 9093
+          volumeMounts:
+            - name: alertmanager-config-volume
+              mountPath: /etc/alertmanager
+            - name: alertmanager-storage-volume
+              mountPath: /alertmanager
+      volumes:
+        - name: alertmanager-config-volume
+          configMap:
+            name: alertmanager-config
+        - name: alertmanager-storage-volume
+          emptyDir: {} # 간단한 테스트를 위해 emptyDir 사용. 운영 환경에서는 PVC 사용 권장

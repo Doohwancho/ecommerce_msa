@@ -1,0 +1,55 @@
+# ===================================================================
+# 1. Alertmanager 설정 (ConfigMap)
+# ===================================================================
+### NEW ###
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+data:
+  alertmanager.yml: |
+    global:
+      # Slack Webhook URL을 이곳에 입력하세요.
+      # 우선 테스트를 위해 임시 URL을 넣어두고 나중에 실제 값으로 교체하세요.
+      slack_api_url: 'https://hooks.slack.com/services/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'
+      resolve_timeout: 5m
+
+    route:
+      receiver: 'slack-default'
+      group_by: ['alertname', 'job']
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        - receiver: 'slack-critical'
+          matchers:
+            - severity = critical
+          continue: false
+
+    receivers:
+      - name: 'slack-default'
+        slack_configs:
+          - channel: '#alerts' # 기본 알람을 받을 채널
+            send_resolved: true
+            title: '[FIRING:{{ .Alerts.Firing | len }}] {{ .CommonLabels.alertname }}'
+            text: |
+              {{ range .Alerts }}
+              *Alert*: {{ .Annotations.summary }}
+              *Description*: {{ .Annotations.description }}
+              *Details*:
+                {{ range .Labels.SortedPairs }} • *{{ .Name }}*: `{{ .Value }}`
+                {{ end }}
+              {{ end }}
+      - name: 'slack-critical'
+        slack_configs:
+          - channel: '#alerts-critical' # 긴급 알람을 받을 채널
+            send_resolved: true
+            title: ':rotating_light: [CRITICAL:{{ .Alerts.Firing | len }}] {{ .CommonLabels.alertname }}'
+            text: |
+              {{ range .Alerts }}
+              *Alert*: {{ .Annotations.summary }}
+              *Description*: {{ .Annotations.description }}
+              *Details*:
+                {{ range .Labels.SortedPairs }} • *{{ .Name }}*: `{{ .Value }}`
+                {{ end }}
+              {{ end }}

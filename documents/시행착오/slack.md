@@ -1,7 +1,27 @@
-# ===================================================================
-# Prometheus 알람 규칙
-# ===================================================================
-### NEW ###
+# slack에 incoming webhook
+
+doohwancho1993@gmail.com 으로 접속
+
+하는법: https://velog.io/@yujinaa/Slack-Incoming-Webhook-%EC%97%B0%EB%8F%99%ED%95%B4%EC%84%9C-%EC%95%8C%EB%A6%BC%EB%B3%B4%EB%82%B4%EA%B8%B0
+
+1. webhook URL
+
+- https://hooks.slack.com/services/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
+
+2. 수신 웹후크 URL
+
+- https://hooks.slack.com/services/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
+
+```bash
+# window terminal 기준,
+curl -X POST -H "Content-Type: application/json" --data "{\"channel\": \"#새-채널\", \"username\": \"테스트봇\", \"text\": \"Windows 명령 프롬프트에서 보내는 테스트 메시지입니다. 🚀\", \"icon_emoji\": \":ghost:\"}" "https://hooks.slack.com/services/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"
+```
+
+3. slack channel '#alerts', '#alerts-critical' 채널 만들기 (alertManager에서 이 채널로 메시지 보낼 예정)
+
+# alert rules
+
+```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -108,49 +128,4 @@ data:
         annotations:
           summary: "✅ 테스트 알람입니다."
           description: "이 메시지가 보인다면, Prometheus -> Alertmanager -> Slack 파이프라인이 정상적으로 동작하는 것입니다."
-
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: prometheus-config
-data:
-  prometheus.yml: |
-    global:
-      scrape_interval: 15s
-
-    # --- 알람 규칙 파일 로드 설정 추가 ---
-    rule_files:
-      - /etc/prometheus/rules/*.yml
-
-    # --- Alertmanager 연동 설정 추가 ---
-    alerting:
-      alertmanagers:
-      - static_configs:
-        - targets:
-          # Alertmanager 서비스의 DNS 주소와 포트
-          - 'alertmanager-service:9093'
-
-    scrape_configs:
-      - job_name: 'kubernetes-pods'
-        kubernetes_sd_configs:
-          - role: pod
-        relabel_configs:
-          # prometheus.io/scrape: 'true' 어노테이션이 있는 pod만 수집 대상으로 선택
-          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
-            action: keep
-            regex: true
-          # prometheus.io/path 어노테이션 값으로 메트릭 경로 설정
-          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
-            action: replace
-            target_label: __metrics_path__
-            regex: (.+)
-          # {pod_ip}:{port} 형식으로 주소 설정
-          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
-            action: replace
-            regex: ([^:]+)(?::\d+)?;(\d+)
-            replacement: $1:$2
-            target_label: __address__
-      - job_name: 'kube-state-metrics'
-        static_configs:
-          - targets: ['kube-state-metrics.kube-system.svc.cluster.local:8080']
+```

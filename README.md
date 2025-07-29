@@ -8,14 +8,14 @@
 
 ## b. 핵심 설계 결정 (Key Design Decisions)
 
-| 구분        | 주제                                                                                     | 적용 기술 및 해결책                                                             |
-| :---------- | :--------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------ |
-| **데이터**  | [대용량 데이터 저장 및 검색 전략](#a-데이터-저장-전략)                                   | **Polyglot Persistence**: MongoDB (원본), Elasticsearch (검색/분석)             |
-| **일관성**  | [분산 트랜잭션 처리](#c-분산-트랜잭션-saga--outbox-패턴)                                 | **SAGA 패턴** with Kafka & Debezium                                             |
-| ️**성능**   | [실시간 재고 관리 (Overselling 방지)](#c-분산-트랜잭션-saga--outbox-패턴)                | **예약 재고 (Reserved Stock)** 패턴 적용                                        |
-| **통신**    | [서비스 간 효율적인 통신](#b-msa-통신-방식)                                              | **gRPC** (내부 동기 통신), **Kafka** (비동기 이벤트)                            |
-| **검색**    | [한국어 검색 품질 향상](#d-읽기검색-성능-최적화)                                         | **Elasticsearch**, Nori 형태소 분석기, 동의어/유의어 사전                       |
-| ️**안정성** | [시스템 안정성 및 자동 복구](#e-시스템-안정성-및-관측-가능성-reliability--observability) | **K8s 기반 HA 구성**, **Jaeger** (분산 추적), **Resilience** 패턴, **APM** 적용 |
+| 구분        | 주제                                                                                     | 적용 기술 및 해결책                                                                         |
+| :---------- | :--------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------ |
+| **데이터**  | [대용량 데이터 저장 및 검색 전략](#a-데이터-저장-전략)                                   | **Polyglot Persistence**: MongoDB (원본), Elasticsearch (검색/분석)                         |
+| **일관성**  | [분산 트랜잭션 처리](#c-분산-트랜잭션-saga--outbox-패턴)                                 | **SAGA 패턴** with Kafka & Debezium                                                         |
+| ️**성능**   | [실시간 재고 관리 (Overselling 방지)](#c-분산-트랜잭션-saga--outbox-패턴)                | **예약 재고 (Reserved Stock)** 패턴 적용                                                    |
+| **통신**    | [서비스 간 효율적인 통신](#b-msa-통신-방식)                                              | **gRPC** (내부 동기 통신), **Kafka** (비동기 이벤트)                                        |
+| **검색**    | [한국어 검색 품질 향상](#d-읽기검색-성능-최적화)                                         | **Elasticsearch**, Nori 형태소 분석기, 동의어/유의어 사전                                   |
+| ️**안정성** | [시스템 안정성 및 자동 복구](#e-시스템-안정성-및-관측-가능성-reliability--observability) | **K8s 기반 HA 구성**, **Jaeger** (분산 추적), **Resilience** 패턴, **APM**과 **alert** 적용 |
 
 ## c. tech stacks
 
@@ -32,17 +32,21 @@
     - 비동기 connector: aiomysql & sqlalchemy[asyncio]
   - elastic search (logs, products_catalog)
     - 비동기 connector w/ mongodb: monstache
-- sre
-  - opentelemetry
-    - logging
-      - elastic search
-      - kibana
-    - distributed tracing
-      - jaeger
+- SRE
+  - logging
+    - opentelemetry
+    - elastic search
+    - kibana
+  - distributed tracing
+    - opentelemetry
+    - jaeger
   - APM
     - kube-state-metrics
     - prometheus
     - grafana
+  - alert
+    - alert-manager
+    - slack
 
 ## d. ERD
 
@@ -465,7 +469,9 @@ _그림 3: 에러 발생 시(빨간색), 해당 Span의 상세 로그 및 스택
 - **ELK Stack (Otel -> Elasticsearch -> Kibana)**: 모든 마이크로서비스의 로그를 한곳에서 수집하고 분석하여, 장애 발생 시 신속하게 원인을 파악할 수 있도록 구성했습니다.
 
 ![](documents/images/elastic_search-log-1.png)
-_로그를 opentelemetry를 통해 elastic search에 쌓은걸 kibana로 시각화한 모습이다._
+
+- _로그를 opentelemetry를 통해 elastic search에 쌓은걸 kibana로 시각화한 모습이다._
+- _elastic search로 대량의 로그를 검색하기 때문에 로그 검색 query한번에 15분+ 걸리지 않아 에러대처를 빠르게 할 수있다._
 
 ## e. k8s APM
 
@@ -473,3 +479,10 @@ _로그를 opentelemetry를 통해 elastic search에 쌓은걸 kibana로 시각�
 ![](./documents/images/grafana2.png)
 
 _여러 pod들의 APM을 prometheus + grafana를 이용하여 한화면에 모니터링하게 세팅한 모습이다._
+
+## f. alert-manager
+
+![](./documents/images/alert1.png)
+![](./documents/images/alert2.png)
+
+- _장애가 터진 후에 즉시 알람을 받아 빠르게 조치하는것도 중요하지만, 전조상황을 보고 선제대응하는 것 또한 SRE 필수 요소 중 하나이다._

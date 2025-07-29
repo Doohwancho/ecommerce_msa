@@ -18,15 +18,24 @@ spec:
           image: prom/prometheus:v2.45.0
           args:
             - "--config.file=/etc/prometheus/prometheus.yml"
+            # --- Alertmanager와 통신하기 위한 설정 추가 ---
+            - "--web.enable-lifecycle"
           ports:
             - containerPort: 9090
           volumeMounts:
             - name: prometheus-config-volume
               mountPath: /etc/prometheus/
+            # --- 알람 규칙 파일을 마운트하기 위한 볼륨 추가 ---
+            - name: prometheus-rules-volume
+              mountPath: /etc/prometheus/rules/
       volumes:
         - name: prometheus-config-volume
           configMap:
             name: prometheus-config
+        # --- 알람 규칙 ConfigMap을 볼륨으로 정의 ---
+        - name: prometheus-rules-volume
+          configMap:
+            name: prometheus-rules
 ---
 apiVersion: v1
 kind: Service
