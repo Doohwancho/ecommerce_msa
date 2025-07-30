@@ -475,10 +475,11 @@ _그림 3: 에러 발생 시(빨간색), 해당 Span의 상세 로그 및 스택
 
 ## e. k8s APM
 
-![](./documents/images/grafana1.png)
+![](./documents/images/sre.png)
 ![](./documents/images/grafana2.png)
 
-_여러 pod들의 APM을 prometheus + grafana를 이용하여 한화면에 모니터링하게 세팅한 모습이다._
+- _1달 목표 99.9%의 availability, 평균 latency 200ms 이하 목표 지표를 커스텀하여 만듬_
+- _여러 pod들의 APM을 prometheus + grafana를 이용하여 한화면에 모니터링하게 세팅한 모습이다._
 
 ## f. alert-manager
 
